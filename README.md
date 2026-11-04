@@ -550,6 +550,1320 @@ PY
 
 `path/to/transcript_class_counts.tsv` contains cell-level counts for Gene-alone, TE-alone, and TE–gene chimeric transcripts. `path/to/transcript_class_map.tsv` records the identifier match, and `path/to/unmatched_transcripts.txt` lists quantification-matrix transcripts that remain without a class. A large unmatched set indicates that `-gtf` in `cal_TE` and the annotation used by FLAMESv2 are different files.
 
+## Full Pipeline Examples
+
+The six examples below are complete shell scripts. Each one reads one platform-specific FASTQ and writes the transcript matrix, the TE matrices, and the class-level matrix. Save a script and execute it with `bash`.
+
+Shared inputs:
+
+| File | Role |
+| --- | --- |
+| `path/to/ONT/test.fastq` | ONT test reads |
+| `path/to/PacBio/test.fastq` | PacBio test reads |
+| `path/to/genome.fa` | Reference genome |
+| `path/to/genes.gtf` | Reference gene annotation |
+| `path/to/ref_genome_dir` | 10x reference directory for wf-single-cell |
+| `path/to/barcodes.txt` | Cell-barcode whitelist |
+| `path/to/repeatmasker.out` | RepeatMasker output used to build `path/to/TE_annotation.gtf` |
+| `path/to/flames.sif` | FLAMESv2 image |
+
+The three ONT scripts share `path/to/ONT/test_filtered.fastq.gz`. The three PacBio scripts share `path/to/PacBio/test_filtered.fastq.gz`. Route-specific results are written under a separate directory. `EXPECTED_CELLS`, `KIT`, and `CHEMISTRY` follow the test library; the values below match 10x Chromium 3' v3.
+
+| Route | Barcode and UMI | Discovery | Annotation passed to FLAMESv2 and `cal_TE` |
+| --- | --- | --- | --- |
+| ONT, reference annotation | wf-single-cell | — | `path/to/genes.gtf` |
+| ONT, LRAA | wf-single-cell | LRAA | `path/to/ONT/LRAA/extended_annotation.gtf` |
+| ONT, Bambu-pipe | wf-single-cell | Bambu-pipe | `path/to/ONT/Bambu-pipe/extended_annotation.gtf` |
+| PacBio, reference annotation | FLAMESv2 | — | `path/to/genes.gtf` |
+| PacBio, LRAA | FLAMESv2 | LRAA | `path/to/PacBio/LRAA/extended_annotation.gtf` |
+| PacBio, Bambu-pipe | FLAMESv2 | Bambu-pipe | `path/to/PacBio/Bambu-pipe/extended_annotation.gtf` |
+
+On the two discovery routes, FLAMESv2 is run again after the extended annotation has been written. On PacBio the first FLAMESv2 run assigns barcodes and, for LRAA, supplies `path/to/PacBio/LRAA/align2genome.bam`. Bambu-pipe reads the filtered FASTQ and writes `extended_annotations.gtf`, which is then stored as `extended_annotation.gtf`.
+
+### ONT, reference annotation
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(conda info --base)/etc/profile.d/conda.sh"
+export PATH="$HOME/.local/bin:${PATH}"
+
+activate() { set +u; conda activate "$1"; set -u; }
+
+THREADS=8
+EXPECTED_CELLS=2000
+KIT="3prime:v3"
+
+FASTQ=path/to/ONT/test.fastq
+FILTERED=path/to/ONT/test_filtered.fastq.gz
+HTML=path/to/ONT/test_filtered_report.html
+JSON=path/to/ONT/test_filtered_report.json
+GENOME=path/to/genome.fa
+REF_GTF=path/to/genes.gtf
+REF_DIR=path/to/ref_genome_dir
+BARCODES=path/to/barcodes.txt
+REPEATMASKER=path/to/repeatmasker.out
+TE_GTF=path/to/TE_annotation.gtf
+FLAMES_SIF=path/to/flames.sif
+MINITE=path/to/miniTEQuant
+OUT=path/to/ONT/no_discovery
+ANNOT="$REF_GTF"
+
+run_fastplong() {
+  activate fastplong
+  fastplong -i "$FASTQ" -o "$FILTERED" -h "$HTML" -j "$JSON" -m 20 -l 100 -w "$THREADS" -A
+}
+
+run_wf() {
+  mkdir -p "$OUT/wf_output" "$OUT/wf_work"
+  nextflow run epi2me-labs/wf-single-cell -r v3.3.4 \
+    -profile singularity \
+    --fastq "$FILTERED" \
+    --sample test \
+    --expected_cells "$EXPECTED_CELLS" \
+    --kit "$KIT" \
+    --ref_genome_dir "$REF_DIR" \
+    --out_dir "$OUT/wf_output" \
+    --threads "$THREADS" \
+    -work-dir "$OUT/wf_work" \
+    -resume
+  local src="$OUT/wf_output/test/test.tagged.bam"
+  [[ -f "$src" ]]
+  activate lraa
+  local header
+  header=$(samtools view -H "$src" | awk '$1=="@HD"{print; exit}')
+  if [[ "$header" == *SO:coordinate* ]]; then
+    cp -a "$src" "$OUT/tagged.bam"
+    if [[ -f "${src}.bai" ]]; then
+      cp -a "${src}.bai" "$OUT/tagged.bam.bai"
+    else
+      samtools index "$OUT/tagged.bam"
+    fi
+  else
+    samtools sort -@ "$THREADS" -o "$OUT/tagged.bam" "$src"
+    samtools index "$OUT/tagged.bam"
+  fi
+}
+
+run_flames() {
+  local outdir="$1" annot="$2"
+  mkdir -p "$outdir"
+  cat > "$outdir/run_flames.R" <<EOF
+options(bspm.sudo = TRUE)
+basilisk::setBasiliskFork(FALSE)
+suppressPackageStartupMessages(library(FLAMES))
+outdir   <- "${outdir}"
+fastq    <- "${FILTERED}"
+annot    <- "${annot}"
+genome   <- "${GENOME}"
+barcodes <- "${BARCODES}"
+threads  <- ${THREADS}
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+cfg <- create_config(
+  outdir,
+  pipeline_parameters.demultiplexer = "flexiplex",
+  do_isoform_identification = FALSE,
+  bambu_isoform_identification = FALSE,
+  oarfish_quantification = TRUE,
+  threads = threads
+)
+pipeline <- SingleCellPipeline(
+  config_file = cfg, outdir = outdir, fastq = c(fastq),
+  annotation = annot, genome_fa = genome, barcodes_file = barcodes
+)
+pipeline <- run_FLAMES(pipeline)
+saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
+EOF
+  singularity exec -e --bind path/to:path/to "$FLAMES_SIF" Rscript "$outdir/run_flames.R"
+}
+
+convert_matrix() {
+  activate miniTEQuant
+  python - "$1" "$2" <<'PY'
+import sys
+from pathlib import Path
+from scipy import io, sparse
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+dst.mkdir(parents=True, exist_ok=True)
+prefix = next(src.glob("*.count.mtx")).name[: -len(".count.mtx")]
+barcodes = [x for x in (src / f"{prefix}.barcodes.txt").read_text().splitlines() if x]
+features = [ln.split("\t", 1)[0] for ln in (src / f"{prefix}.features.txt").read_text().splitlines() if ln]
+matrix = io.mmread(src / f"{prefix}.count.mtx").tocsr()
+if matrix.shape == (len(barcodes), len(features)):
+    matrix = matrix.T.tocsr()
+if matrix.shape != (len(features), len(barcodes)):
+    raise SystemExit(f"Unexpected matrix shape {matrix.shape}")
+(dst / "barcodes.tsv").write_text("\n".join(barcodes) + "\n")
+(dst / "features.tsv").write_text("\n".join(features) + "\n")
+io.mmwrite(dst / "matrix.mtx", sparse.coo_matrix(matrix))
+PY
+}
+
+run_te() {
+  activate miniTEQuant
+  if [[ ! -s "$TE_GTF" ]]; then
+    python "$MINITE/isoform_quantification/TE_analyse/create_simple_TE_gtf.py" \
+      -i "$REPEATMASKER" -o "$TE_GTF"
+  fi
+  python "$MINITE/isoform_quantification/main.py" cal_TE \
+    -gtf "$ANNOT" -te_gtf "$TE_GTF" \
+    --custom_sc_quant "$OUT/filtered_feature_bc_matrix" \
+    -t "$THREADS" -o "$OUT/te_quant"
+}
+
+classify() {
+  activate miniTEQuant
+  QUANT_DIR="$OUT/filtered_feature_bc_matrix" \
+  CLASS_FILE="$OUT/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv" \
+  OUT_FILE="$OUT/transcript_class_counts.tsv" \
+  MAP_FILE="$OUT/transcript_class_map.tsv" \
+  UNMATCHED_FILE="$OUT/unmatched_transcripts.txt" \
+  python - <<'PY'
+import gzip, os, re
+from pathlib import Path
+import numpy as np, pandas as pd
+from scipy import io
+quant_dir = Path(os.environ["QUANT_DIR"])
+def open_text(path):
+    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
+def locate(stem):
+    for name in (stem, stem + ".gz"):
+        candidate = quant_dir / name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(quant_dir / stem)
+def strip_version(identifier):
+    return re.sub(r"\.\d+$", "", identifier)
+barcodes = [ln.strip() for ln in open_text(locate("barcodes.tsv")) if ln.strip()]
+features = []
+with open_text(locate("features.tsv")) as handle:
+    for line in handle:
+        fields = line.rstrip("\n").split("\t")
+        if fields and fields[0]:
+            features.append(fields[0])
+matrix = io.mmread(locate("matrix.mtx")).tocsr()
+if matrix.shape == (len(barcodes), len(features)):
+    matrix = matrix.T.tocsr()
+if matrix.shape != (len(features), len(barcodes)):
+    raise SystemExit(f"Matrix shape {matrix.shape} does not match {len(features)} transcripts by {len(barcodes)} cells")
+table = pd.read_csv(os.environ["CLASS_FILE"], sep="\t", header=None, dtype=str, keep_default_na=False)
+if table.shape[1] < 11:
+    raise SystemExit("cell_transcript_classification_counts.tsv has fewer than 11 columns")
+if table.iloc[0, 10].strip().lower() in {"classification", "transcript_classification", "class"}:
+    table = table.iloc[1:].reset_index(drop=True)
+class_by_id, class_by_stripped = {}, {}
+for transcript_id, transcript_class in zip(table.iloc[:, 0], table.iloc[:, 10]):
+    transcript_id, transcript_class = transcript_id.strip(), transcript_class.strip()
+    if transcript_id and transcript_class:
+        class_by_id[transcript_id] = transcript_class
+        class_by_stripped.setdefault(strip_version(transcript_id), transcript_class)
+labels = []
+for transcript_id in features:
+    label = class_by_id.get(transcript_id)
+    if label is None:
+        label = class_by_stripped.get(strip_version(transcript_id))
+    labels.append(label)
+assignment = pd.DataFrame({"transcript_id": features, "class": labels})
+assignment.to_csv(os.environ["MAP_FILE"], sep="\t", index=False)
+assignment.loc[assignment["class"].isna(), "transcript_id"].to_csv(os.environ["UNMATCHED_FILE"], index=False, header=False)
+preferred = ["Gene-alone", "TE-alone", "TE-Gene"]
+present = [label for label in preferred if (assignment["class"] == label).any()]
+present += sorted(set(assignment["class"].dropna()) - set(preferred))
+if not present:
+    raise SystemExit("No quantification-matrix transcript matched a class")
+rows = []
+for label in present:
+    positions = [i for i, value in enumerate(labels) if value == label]
+    rows.append(np.asarray(matrix[positions].sum(axis=0)).ravel().astype(int))
+counts = pd.DataFrame(rows, index=present, columns=barcodes)
+counts.index.name = "class"
+counts.to_csv(os.environ["OUT_FILE"], sep="\t")
+print(f"Matched transcripts: {assignment['class'].notna().sum()} / {len(features)}")
+PY
+}
+
+mkdir -p "$OUT"
+run_fastplong
+run_wf
+run_flames "$OUT/flames_output" "$ANNOT"
+convert_matrix "$OUT/flames_output" "$OUT/filtered_feature_bc_matrix"
+run_te
+classify
+echo "ONT reference-annotation results: $OUT/filtered_feature_bc_matrix $OUT/te_quant/Custom_SC_TE_output $OUT/transcript_class_counts.tsv"
+```
+
+### ONT, LRAA discovery
+
+LRAA reads `path/to/ONT/LRAA/tagged.bam`. The resulting annotation is `path/to/ONT/LRAA/extended_annotation.gtf`.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(conda info --base)/etc/profile.d/conda.sh"
+export PATH="$HOME/.local/bin:path/to/LongReadAlignmentAssembler:${PATH}"
+
+activate() { set +u; conda activate "$1"; set -u; }
+
+THREADS=8
+EXPECTED_CELLS=2000
+KIT="3prime:v3"
+
+FASTQ=path/to/ONT/test.fastq
+FILTERED=path/to/ONT/test_filtered.fastq.gz
+HTML=path/to/ONT/test_filtered_report.html
+JSON=path/to/ONT/test_filtered_report.json
+GENOME=path/to/genome.fa
+REF_GTF=path/to/genes.gtf
+REF_DIR=path/to/ref_genome_dir
+BARCODES=path/to/barcodes.txt
+REPEATMASKER=path/to/repeatmasker.out
+TE_GTF=path/to/TE_annotation.gtf
+FLAMES_SIF=path/to/flames.sif
+MINITE=path/to/miniTEQuant
+OUT=path/to/ONT/LRAA
+ANNOT="$REF_GTF"
+
+run_fastplong() {
+  activate fastplong
+  fastplong -i "$FASTQ" -o "$FILTERED" -h "$HTML" -j "$JSON" -m 20 -l 100 -w "$THREADS" -A
+}
+
+run_wf() {
+  mkdir -p "$OUT/wf_output" "$OUT/wf_work"
+  nextflow run epi2me-labs/wf-single-cell -r v3.3.4 \
+    -profile singularity \
+    --fastq "$FILTERED" \
+    --sample test \
+    --expected_cells "$EXPECTED_CELLS" \
+    --kit "$KIT" \
+    --ref_genome_dir "$REF_DIR" \
+    --out_dir "$OUT/wf_output" \
+    --threads "$THREADS" \
+    -work-dir "$OUT/wf_work" \
+    -resume
+  local src="$OUT/wf_output/test/test.tagged.bam"
+  [[ -f "$src" ]]
+  activate lraa
+  local header
+  header=$(samtools view -H "$src" | awk '$1=="@HD"{print; exit}')
+  if [[ "$header" == *SO:coordinate* ]]; then
+    cp -a "$src" "$OUT/tagged.bam"
+    if [[ -f "${src}.bai" ]]; then
+      cp -a "${src}.bai" "$OUT/tagged.bam.bai"
+    else
+      samtools index "$OUT/tagged.bam"
+    fi
+  else
+    samtools sort -@ "$THREADS" -o "$OUT/tagged.bam" "$src"
+    samtools index "$OUT/tagged.bam"
+  fi
+}
+
+run_lraa() {
+  activate lraa
+  samtools index "$OUT/tagged.bam"
+  LRAA \
+    --genome "$GENOME" \
+    --bam "$OUT/tagged.bam" \
+    --gtf "$REF_GTF" \
+    --output_prefix "$OUT/extended_annotation" \
+    --cell_barcode_tag CB \
+    --read_umi_tag UB \
+    --num_parallel_contigs 4 \
+    --num_threads_per_worker "$THREADS" \
+    --oversimplify chrM
+  ANNOT="$OUT/extended_annotation.gtf"
+  [[ -s "$ANNOT" ]]
+}
+
+run_flames() {
+  local outdir="$1" annot="$2"
+  mkdir -p "$outdir"
+  cat > "$outdir/run_flames.R" <<EOF
+options(bspm.sudo = TRUE)
+basilisk::setBasiliskFork(FALSE)
+suppressPackageStartupMessages(library(FLAMES))
+outdir   <- "${outdir}"
+fastq    <- "${FILTERED}"
+annot    <- "${annot}"
+genome   <- "${GENOME}"
+barcodes <- "${BARCODES}"
+threads  <- ${THREADS}
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+cfg <- create_config(
+  outdir,
+  pipeline_parameters.demultiplexer = "flexiplex",
+  do_isoform_identification = FALSE,
+  bambu_isoform_identification = FALSE,
+  oarfish_quantification = TRUE,
+  threads = threads
+)
+pipeline <- SingleCellPipeline(
+  config_file = cfg, outdir = outdir, fastq = c(fastq),
+  annotation = annot, genome_fa = genome, barcodes_file = barcodes
+)
+pipeline <- run_FLAMES(pipeline)
+saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
+EOF
+  singularity exec -e --bind path/to:path/to "$FLAMES_SIF" Rscript "$outdir/run_flames.R"
+}
+
+convert_matrix() {
+  activate miniTEQuant
+  python - "$1" "$2" <<'PY'
+import sys
+from pathlib import Path
+from scipy import io, sparse
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+dst.mkdir(parents=True, exist_ok=True)
+prefix = next(src.glob("*.count.mtx")).name[: -len(".count.mtx")]
+barcodes = [x for x in (src / f"{prefix}.barcodes.txt").read_text().splitlines() if x]
+features = [ln.split("\t", 1)[0] for ln in (src / f"{prefix}.features.txt").read_text().splitlines() if ln]
+matrix = io.mmread(src / f"{prefix}.count.mtx").tocsr()
+if matrix.shape == (len(barcodes), len(features)):
+    matrix = matrix.T.tocsr()
+if matrix.shape != (len(features), len(barcodes)):
+    raise SystemExit(f"Unexpected matrix shape {matrix.shape}")
+(dst / "barcodes.tsv").write_text("\n".join(barcodes) + "\n")
+(dst / "features.tsv").write_text("\n".join(features) + "\n")
+io.mmwrite(dst / "matrix.mtx", sparse.coo_matrix(matrix))
+PY
+}
+
+run_te() {
+  activate miniTEQuant
+  if [[ ! -s "$TE_GTF" ]]; then
+    python "$MINITE/isoform_quantification/TE_analyse/create_simple_TE_gtf.py" \
+      -i "$REPEATMASKER" -o "$TE_GTF"
+  fi
+  python "$MINITE/isoform_quantification/main.py" cal_TE \
+    -gtf "$ANNOT" -te_gtf "$TE_GTF" \
+    --custom_sc_quant "$OUT/filtered_feature_bc_matrix" \
+    -t "$THREADS" -o "$OUT/te_quant"
+}
+
+classify() {
+  activate miniTEQuant
+  QUANT_DIR="$OUT/filtered_feature_bc_matrix" \
+  CLASS_FILE="$OUT/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv" \
+  OUT_FILE="$OUT/transcript_class_counts.tsv" \
+  MAP_FILE="$OUT/transcript_class_map.tsv" \
+  UNMATCHED_FILE="$OUT/unmatched_transcripts.txt" \
+  python - <<'PY'
+import gzip, os, re
+from pathlib import Path
+import numpy as np, pandas as pd
+from scipy import io
+quant_dir = Path(os.environ["QUANT_DIR"])
+def open_text(path):
+    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
+def locate(stem):
+    for name in (stem, stem + ".gz"):
+        candidate = quant_dir / name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(quant_dir / stem)
+def strip_version(identifier):
+    return re.sub(r"\.\d+$", "", identifier)
+barcodes = [ln.strip() for ln in open_text(locate("barcodes.tsv")) if ln.strip()]
+features = []
+with open_text(locate("features.tsv")) as handle:
+    for line in handle:
+        fields = line.rstrip("\n").split("\t")
+        if fields and fields[0]:
+            features.append(fields[0])
+matrix = io.mmread(locate("matrix.mtx")).tocsr()
+if matrix.shape == (len(barcodes), len(features)):
+    matrix = matrix.T.tocsr()
+if matrix.shape != (len(features), len(barcodes)):
+    raise SystemExit(f"Matrix shape {matrix.shape} does not match {len(features)} transcripts by {len(barcodes)} cells")
+table = pd.read_csv(os.environ["CLASS_FILE"], sep="\t", header=None, dtype=str, keep_default_na=False)
+if table.shape[1] < 11:
+    raise SystemExit("cell_transcript_classification_counts.tsv has fewer than 11 columns")
+if table.iloc[0, 10].strip().lower() in {"classification", "transcript_classification", "class"}:
+    table = table.iloc[1:].reset_index(drop=True)
+class_by_id, class_by_stripped = {}, {}
+for transcript_id, transcript_class in zip(table.iloc[:, 0], table.iloc[:, 10]):
+    transcript_id, transcript_class = transcript_id.strip(), transcript_class.strip()
+    if transcript_id and transcript_class:
+        class_by_id[transcript_id] = transcript_class
+        class_by_stripped.setdefault(strip_version(transcript_id), transcript_class)
+labels = []
+for transcript_id in features:
+    label = class_by_id.get(transcript_id)
+    if label is None:
+        label = class_by_stripped.get(strip_version(transcript_id))
+    labels.append(label)
+assignment = pd.DataFrame({"transcript_id": features, "class": labels})
+assignment.to_csv(os.environ["MAP_FILE"], sep="\t", index=False)
+assignment.loc[assignment["class"].isna(), "transcript_id"].to_csv(os.environ["UNMATCHED_FILE"], index=False, header=False)
+preferred = ["Gene-alone", "TE-alone", "TE-Gene"]
+present = [label for label in preferred if (assignment["class"] == label).any()]
+present += sorted(set(assignment["class"].dropna()) - set(preferred))
+if not present:
+    raise SystemExit("No quantification-matrix transcript matched a class")
+rows = []
+for label in present:
+    positions = [i for i, value in enumerate(labels) if value == label]
+    rows.append(np.asarray(matrix[positions].sum(axis=0)).ravel().astype(int))
+counts = pd.DataFrame(rows, index=present, columns=barcodes)
+counts.index.name = "class"
+counts.to_csv(os.environ["OUT_FILE"], sep="\t")
+print(f"Matched transcripts: {assignment['class'].notna().sum()} / {len(features)}")
+PY
+}
+
+mkdir -p "$OUT"
+run_fastplong
+run_wf
+run_lraa
+run_flames "$OUT/flames_output" "$ANNOT"
+convert_matrix "$OUT/flames_output" "$OUT/filtered_feature_bc_matrix"
+run_te
+classify
+echo "ONT LRAA results: $OUT/extended_annotation.gtf $OUT/filtered_feature_bc_matrix $OUT/te_quant/Custom_SC_TE_output $OUT/transcript_class_counts.tsv"
+```
+
+### ONT, Bambu-pipe discovery
+
+Bambu-pipe reads `path/to/ONT/test_filtered.fastq.gz`. Its `extended_annotations.gtf` is saved as `path/to/ONT/Bambu-pipe/extended_annotation.gtf` and passed to FLAMESv2.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(conda info --base)/etc/profile.d/conda.sh"
+export PATH="$HOME/.local/bin:${PATH}"
+
+activate() { set +u; conda activate "$1"; set -u; }
+
+THREADS=8
+EXPECTED_CELLS=2000
+KIT="3prime:v3"
+CHEMISTRY="10x3v3"
+
+FASTQ=path/to/ONT/test.fastq
+FILTERED=path/to/ONT/test_filtered.fastq.gz
+HTML=path/to/ONT/test_filtered_report.html
+JSON=path/to/ONT/test_filtered_report.json
+GENOME=path/to/genome.fa
+REF_GTF=path/to/genes.gtf
+REF_DIR=path/to/ref_genome_dir
+BARCODES=path/to/barcodes.txt
+REPEATMASKER=path/to/repeatmasker.out
+TE_GTF=path/to/TE_annotation.gtf
+FLAMES_SIF=path/to/flames.sif
+MINITE=path/to/miniTEQuant
+BAMBU_DIR=path/to/bambu-pipe
+OUT=path/to/ONT/Bambu-pipe
+ANNOT="$REF_GTF"
+
+run_fastplong() {
+  activate fastplong
+  fastplong -i "$FASTQ" -o "$FILTERED" -h "$HTML" -j "$JSON" -m 20 -l 100 -w "$THREADS" -A
+}
+
+run_wf() {
+  mkdir -p "$OUT/wf_output" "$OUT/wf_work"
+  nextflow run epi2me-labs/wf-single-cell -r v3.3.4 \
+    -profile singularity \
+    --fastq "$FILTERED" \
+    --sample test \
+    --expected_cells "$EXPECTED_CELLS" \
+    --kit "$KIT" \
+    --ref_genome_dir "$REF_DIR" \
+    --out_dir "$OUT/wf_output" \
+    --threads "$THREADS" \
+    -work-dir "$OUT/wf_work" \
+    -resume
+  local src="$OUT/wf_output/test/test.tagged.bam"
+  [[ -f "$src" ]]
+  activate lraa
+  local header
+  header=$(samtools view -H "$src" | awk '$1=="@HD"{print; exit}')
+  if [[ "$header" == *SO:coordinate* ]]; then
+    cp -a "$src" "$OUT/tagged.bam"
+    if [[ -f "${src}.bai" ]]; then
+      cp -a "${src}.bai" "$OUT/tagged.bam.bai"
+    else
+      samtools index "$OUT/tagged.bam"
+    fi
+  else
+    samtools sort -@ "$THREADS" -o "$OUT/tagged.bam" "$src"
+    samtools index "$OUT/tagged.bam"
+  fi
+}
+
+run_bambu() {
+  cat > "$OUT/samplesheet.csv" <<EOF
+sample,path,chemistry,technology
+test,${FILTERED},${CHEMISTRY},ONT
+EOF
+  nextflow run "$BAMBU_DIR/main.nf" \
+    --input "$OUT/samplesheet.csv" \
+    --genome "$GENOME" \
+    --annotation "$REF_GTF" \
+    --output_dir "$OUT/bambu_output" \
+    --chemistry "$CHEMISTRY" \
+    --technology ONT \
+    --qscore_filtering false \
+    --quantification_mode no_quant \
+    -profile singularity,local \
+    -work-dir "$OUT/bambu_work" \
+    -resume
+  cp "$OUT/bambu_output/extended_annotations.gtf" "$OUT/extended_annotation.gtf"
+  ANNOT="$OUT/extended_annotation.gtf"
+}
+
+run_flames() {
+  local outdir="$1" annot="$2"
+  mkdir -p "$outdir"
+  cat > "$outdir/run_flames.R" <<EOF
+options(bspm.sudo = TRUE)
+basilisk::setBasiliskFork(FALSE)
+suppressPackageStartupMessages(library(FLAMES))
+outdir   <- "${outdir}"
+fastq    <- "${FILTERED}"
+annot    <- "${annot}"
+genome   <- "${GENOME}"
+barcodes <- "${BARCODES}"
+threads  <- ${THREADS}
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+cfg <- create_config(
+  outdir,
+  pipeline_parameters.demultiplexer = "flexiplex",
+  do_isoform_identification = FALSE,
+  bambu_isoform_identification = FALSE,
+  oarfish_quantification = TRUE,
+  threads = threads
+)
+pipeline <- SingleCellPipeline(
+  config_file = cfg, outdir = outdir, fastq = c(fastq),
+  annotation = annot, genome_fa = genome, barcodes_file = barcodes
+)
+pipeline <- run_FLAMES(pipeline)
+saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
+EOF
+  singularity exec -e --bind path/to:path/to "$FLAMES_SIF" Rscript "$outdir/run_flames.R"
+}
+
+convert_matrix() {
+  activate miniTEQuant
+  python - "$1" "$2" <<'PY'
+import sys
+from pathlib import Path
+from scipy import io, sparse
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+dst.mkdir(parents=True, exist_ok=True)
+prefix = next(src.glob("*.count.mtx")).name[: -len(".count.mtx")]
+barcodes = [x for x in (src / f"{prefix}.barcodes.txt").read_text().splitlines() if x]
+features = [ln.split("\t", 1)[0] for ln in (src / f"{prefix}.features.txt").read_text().splitlines() if ln]
+matrix = io.mmread(src / f"{prefix}.count.mtx").tocsr()
+if matrix.shape == (len(barcodes), len(features)):
+    matrix = matrix.T.tocsr()
+if matrix.shape != (len(features), len(barcodes)):
+    raise SystemExit(f"Unexpected matrix shape {matrix.shape}")
+(dst / "barcodes.tsv").write_text("\n".join(barcodes) + "\n")
+(dst / "features.tsv").write_text("\n".join(features) + "\n")
+io.mmwrite(dst / "matrix.mtx", sparse.coo_matrix(matrix))
+PY
+}
+
+run_te() {
+  activate miniTEQuant
+  if [[ ! -s "$TE_GTF" ]]; then
+    python "$MINITE/isoform_quantification/TE_analyse/create_simple_TE_gtf.py" \
+      -i "$REPEATMASKER" -o "$TE_GTF"
+  fi
+  python "$MINITE/isoform_quantification/main.py" cal_TE \
+    -gtf "$ANNOT" -te_gtf "$TE_GTF" \
+    --custom_sc_quant "$OUT/filtered_feature_bc_matrix" \
+    -t "$THREADS" -o "$OUT/te_quant"
+}
+
+classify() {
+  activate miniTEQuant
+  QUANT_DIR="$OUT/filtered_feature_bc_matrix" \
+  CLASS_FILE="$OUT/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv" \
+  OUT_FILE="$OUT/transcript_class_counts.tsv" \
+  MAP_FILE="$OUT/transcript_class_map.tsv" \
+  UNMATCHED_FILE="$OUT/unmatched_transcripts.txt" \
+  python - <<'PY'
+import gzip, os, re
+from pathlib import Path
+import numpy as np, pandas as pd
+from scipy import io
+quant_dir = Path(os.environ["QUANT_DIR"])
+def open_text(path):
+    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
+def locate(stem):
+    for name in (stem, stem + ".gz"):
+        candidate = quant_dir / name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(quant_dir / stem)
+def strip_version(identifier):
+    return re.sub(r"\.\d+$", "", identifier)
+barcodes = [ln.strip() for ln in open_text(locate("barcodes.tsv")) if ln.strip()]
+features = []
+with open_text(locate("features.tsv")) as handle:
+    for line in handle:
+        fields = line.rstrip("\n").split("\t")
+        if fields and fields[0]:
+            features.append(fields[0])
+matrix = io.mmread(locate("matrix.mtx")).tocsr()
+if matrix.shape == (len(barcodes), len(features)):
+    matrix = matrix.T.tocsr()
+if matrix.shape != (len(features), len(barcodes)):
+    raise SystemExit(f"Matrix shape {matrix.shape} does not match {len(features)} transcripts by {len(barcodes)} cells")
+table = pd.read_csv(os.environ["CLASS_FILE"], sep="\t", header=None, dtype=str, keep_default_na=False)
+if table.shape[1] < 11:
+    raise SystemExit("cell_transcript_classification_counts.tsv has fewer than 11 columns")
+if table.iloc[0, 10].strip().lower() in {"classification", "transcript_classification", "class"}:
+    table = table.iloc[1:].reset_index(drop=True)
+class_by_id, class_by_stripped = {}, {}
+for transcript_id, transcript_class in zip(table.iloc[:, 0], table.iloc[:, 10]):
+    transcript_id, transcript_class = transcript_id.strip(), transcript_class.strip()
+    if transcript_id and transcript_class:
+        class_by_id[transcript_id] = transcript_class
+        class_by_stripped.setdefault(strip_version(transcript_id), transcript_class)
+labels = []
+for transcript_id in features:
+    label = class_by_id.get(transcript_id)
+    if label is None:
+        label = class_by_stripped.get(strip_version(transcript_id))
+    labels.append(label)
+assignment = pd.DataFrame({"transcript_id": features, "class": labels})
+assignment.to_csv(os.environ["MAP_FILE"], sep="\t", index=False)
+assignment.loc[assignment["class"].isna(), "transcript_id"].to_csv(os.environ["UNMATCHED_FILE"], index=False, header=False)
+preferred = ["Gene-alone", "TE-alone", "TE-Gene"]
+present = [label for label in preferred if (assignment["class"] == label).any()]
+present += sorted(set(assignment["class"].dropna()) - set(preferred))
+if not present:
+    raise SystemExit("No quantification-matrix transcript matched a class")
+rows = []
+for label in present:
+    positions = [i for i, value in enumerate(labels) if value == label]
+    rows.append(np.asarray(matrix[positions].sum(axis=0)).ravel().astype(int))
+counts = pd.DataFrame(rows, index=present, columns=barcodes)
+counts.index.name = "class"
+counts.to_csv(os.environ["OUT_FILE"], sep="\t")
+print(f"Matched transcripts: {assignment['class'].notna().sum()} / {len(features)}")
+PY
+}
+
+mkdir -p "$OUT"
+run_fastplong
+run_wf
+run_bambu
+run_flames "$OUT/flames_output" "$ANNOT"
+convert_matrix "$OUT/flames_output" "$OUT/filtered_feature_bc_matrix"
+run_te
+classify
+echo "ONT Bambu-pipe results: $OUT/extended_annotation.gtf $OUT/filtered_feature_bc_matrix $OUT/te_quant/Custom_SC_TE_output $OUT/transcript_class_counts.tsv"
+```
+
+### PacBio, reference annotation
+
+FLAMESv2 both assigns barcodes and quantifies against `path/to/genes.gtf`. The genome alignment from this run is `path/to/PacBio/no_discovery/flames_output/align2genome.bam`.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(conda info --base)/etc/profile.d/conda.sh"
+export PATH="$HOME/.local/bin:${PATH}"
+
+activate() { set +u; conda activate "$1"; set -u; }
+
+THREADS=8
+
+FASTQ=path/to/PacBio/test.fastq
+FILTERED=path/to/PacBio/test_filtered.fastq.gz
+HTML=path/to/PacBio/test_filtered_report.html
+JSON=path/to/PacBio/test_filtered_report.json
+GENOME=path/to/genome.fa
+REF_GTF=path/to/genes.gtf
+BARCODES=path/to/barcodes.txt
+REPEATMASKER=path/to/repeatmasker.out
+TE_GTF=path/to/TE_annotation.gtf
+FLAMES_SIF=path/to/flames.sif
+MINITE=path/to/miniTEQuant
+OUT=path/to/PacBio/no_discovery
+ANNOT="$REF_GTF"
+
+run_fastplong() {
+  activate fastplong
+  fastplong -i "$FASTQ" -o "$FILTERED" -h "$HTML" -j "$JSON" -m 20 -l 100 -w "$THREADS" -A
+}
+
+run_flames() {
+  local outdir="$1" annot="$2"
+  mkdir -p "$outdir"
+  cat > "$outdir/run_flames.R" <<EOF
+options(bspm.sudo = TRUE)
+basilisk::setBasiliskFork(FALSE)
+suppressPackageStartupMessages(library(FLAMES))
+outdir   <- "${outdir}"
+fastq    <- "${FILTERED}"
+annot    <- "${annot}"
+genome   <- "${GENOME}"
+barcodes <- "${BARCODES}"
+threads  <- ${THREADS}
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+cfg <- create_config(
+  outdir,
+  pipeline_parameters.demultiplexer = "flexiplex",
+  do_isoform_identification = FALSE,
+  bambu_isoform_identification = FALSE,
+  oarfish_quantification = TRUE,
+  threads = threads
+)
+pipeline <- SingleCellPipeline(
+  config_file = cfg, outdir = outdir, fastq = c(fastq),
+  annotation = annot, genome_fa = genome, barcodes_file = barcodes
+)
+pipeline <- run_FLAMES(pipeline)
+saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
+EOF
+  singularity exec -e --bind path/to:path/to "$FLAMES_SIF" Rscript "$outdir/run_flames.R"
+}
+
+convert_matrix() {
+  activate miniTEQuant
+  python - "$1" "$2" <<'PY'
+import sys
+from pathlib import Path
+from scipy import io, sparse
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+dst.mkdir(parents=True, exist_ok=True)
+prefix = next(src.glob("*.count.mtx")).name[: -len(".count.mtx")]
+barcodes = [x for x in (src / f"{prefix}.barcodes.txt").read_text().splitlines() if x]
+features = [ln.split("\t", 1)[0] for ln in (src / f"{prefix}.features.txt").read_text().splitlines() if ln]
+matrix = io.mmread(src / f"{prefix}.count.mtx").tocsr()
+if matrix.shape == (len(barcodes), len(features)):
+    matrix = matrix.T.tocsr()
+if matrix.shape != (len(features), len(barcodes)):
+    raise SystemExit(f"Unexpected matrix shape {matrix.shape}")
+(dst / "barcodes.tsv").write_text("\n".join(barcodes) + "\n")
+(dst / "features.tsv").write_text("\n".join(features) + "\n")
+io.mmwrite(dst / "matrix.mtx", sparse.coo_matrix(matrix))
+PY
+}
+
+run_te() {
+  activate miniTEQuant
+  if [[ ! -s "$TE_GTF" ]]; then
+    python "$MINITE/isoform_quantification/TE_analyse/create_simple_TE_gtf.py" \
+      -i "$REPEATMASKER" -o "$TE_GTF"
+  fi
+  python "$MINITE/isoform_quantification/main.py" cal_TE \
+    -gtf "$ANNOT" -te_gtf "$TE_GTF" \
+    --custom_sc_quant "$OUT/filtered_feature_bc_matrix" \
+    -t "$THREADS" -o "$OUT/te_quant"
+}
+
+classify() {
+  activate miniTEQuant
+  QUANT_DIR="$OUT/filtered_feature_bc_matrix" \
+  CLASS_FILE="$OUT/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv" \
+  OUT_FILE="$OUT/transcript_class_counts.tsv" \
+  MAP_FILE="$OUT/transcript_class_map.tsv" \
+  UNMATCHED_FILE="$OUT/unmatched_transcripts.txt" \
+  python - <<'PY'
+import gzip, os, re
+from pathlib import Path
+import numpy as np, pandas as pd
+from scipy import io
+quant_dir = Path(os.environ["QUANT_DIR"])
+def open_text(path):
+    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
+def locate(stem):
+    for name in (stem, stem + ".gz"):
+        candidate = quant_dir / name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(quant_dir / stem)
+def strip_version(identifier):
+    return re.sub(r"\.\d+$", "", identifier)
+barcodes = [ln.strip() for ln in open_text(locate("barcodes.tsv")) if ln.strip()]
+features = []
+with open_text(locate("features.tsv")) as handle:
+    for line in handle:
+        fields = line.rstrip("\n").split("\t")
+        if fields and fields[0]:
+            features.append(fields[0])
+matrix = io.mmread(locate("matrix.mtx")).tocsr()
+if matrix.shape == (len(barcodes), len(features)):
+    matrix = matrix.T.tocsr()
+if matrix.shape != (len(features), len(barcodes)):
+    raise SystemExit(f"Matrix shape {matrix.shape} does not match {len(features)} transcripts by {len(barcodes)} cells")
+table = pd.read_csv(os.environ["CLASS_FILE"], sep="\t", header=None, dtype=str, keep_default_na=False)
+if table.shape[1] < 11:
+    raise SystemExit("cell_transcript_classification_counts.tsv has fewer than 11 columns")
+if table.iloc[0, 10].strip().lower() in {"classification", "transcript_classification", "class"}:
+    table = table.iloc[1:].reset_index(drop=True)
+class_by_id, class_by_stripped = {}, {}
+for transcript_id, transcript_class in zip(table.iloc[:, 0], table.iloc[:, 10]):
+    transcript_id, transcript_class = transcript_id.strip(), transcript_class.strip()
+    if transcript_id and transcript_class:
+        class_by_id[transcript_id] = transcript_class
+        class_by_stripped.setdefault(strip_version(transcript_id), transcript_class)
+labels = []
+for transcript_id in features:
+    label = class_by_id.get(transcript_id)
+    if label is None:
+        label = class_by_stripped.get(strip_version(transcript_id))
+    labels.append(label)
+assignment = pd.DataFrame({"transcript_id": features, "class": labels})
+assignment.to_csv(os.environ["MAP_FILE"], sep="\t", index=False)
+assignment.loc[assignment["class"].isna(), "transcript_id"].to_csv(os.environ["UNMATCHED_FILE"], index=False, header=False)
+preferred = ["Gene-alone", "TE-alone", "TE-Gene"]
+present = [label for label in preferred if (assignment["class"] == label).any()]
+present += sorted(set(assignment["class"].dropna()) - set(preferred))
+if not present:
+    raise SystemExit("No quantification-matrix transcript matched a class")
+rows = []
+for label in present:
+    positions = [i for i, value in enumerate(labels) if value == label]
+    rows.append(np.asarray(matrix[positions].sum(axis=0)).ravel().astype(int))
+counts = pd.DataFrame(rows, index=present, columns=barcodes)
+counts.index.name = "class"
+counts.to_csv(os.environ["OUT_FILE"], sep="\t")
+print(f"Matched transcripts: {assignment['class'].notna().sum()} / {len(features)}")
+PY
+}
+
+mkdir -p "$OUT"
+run_fastplong
+run_flames "$OUT/flames_output" "$ANNOT"
+convert_matrix "$OUT/flames_output" "$OUT/filtered_feature_bc_matrix"
+run_te
+classify
+echo "PacBio reference-annotation results: $OUT/flames_output/align2genome.bam $OUT/filtered_feature_bc_matrix $OUT/te_quant/Custom_SC_TE_output $OUT/transcript_class_counts.tsv"
+```
+
+### PacBio, LRAA discovery
+
+The first FLAMESv2 run writes `path/to/PacBio/LRAA/flames_align/align2genome.bam`. LRAA is called with `--HiFi` and writes `path/to/PacBio/LRAA/extended_annotation.gtf`. The second FLAMESv2 run quantifies that annotation.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(conda info --base)/etc/profile.d/conda.sh"
+export PATH="$HOME/.local/bin:path/to/LongReadAlignmentAssembler:${PATH}"
+
+activate() { set +u; conda activate "$1"; set -u; }
+
+THREADS=8
+
+FASTQ=path/to/PacBio/test.fastq
+FILTERED=path/to/PacBio/test_filtered.fastq.gz
+HTML=path/to/PacBio/test_filtered_report.html
+JSON=path/to/PacBio/test_filtered_report.json
+GENOME=path/to/genome.fa
+REF_GTF=path/to/genes.gtf
+BARCODES=path/to/barcodes.txt
+REPEATMASKER=path/to/repeatmasker.out
+TE_GTF=path/to/TE_annotation.gtf
+FLAMES_SIF=path/to/flames.sif
+MINITE=path/to/miniTEQuant
+OUT=path/to/PacBio/LRAA
+ANNOT="$REF_GTF"
+
+run_fastplong() {
+  activate fastplong
+  fastplong -i "$FASTQ" -o "$FILTERED" -h "$HTML" -j "$JSON" -m 20 -l 100 -w "$THREADS" -A
+}
+
+run_flames() {
+  local outdir="$1" annot="$2"
+  mkdir -p "$outdir"
+  cat > "$outdir/run_flames.R" <<EOF
+options(bspm.sudo = TRUE)
+basilisk::setBasiliskFork(FALSE)
+suppressPackageStartupMessages(library(FLAMES))
+outdir   <- "${outdir}"
+fastq    <- "${FILTERED}"
+annot    <- "${annot}"
+genome   <- "${GENOME}"
+barcodes <- "${BARCODES}"
+threads  <- ${THREADS}
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+cfg <- create_config(
+  outdir,
+  pipeline_parameters.demultiplexer = "flexiplex",
+  do_isoform_identification = FALSE,
+  bambu_isoform_identification = FALSE,
+  oarfish_quantification = TRUE,
+  threads = threads
+)
+pipeline <- SingleCellPipeline(
+  config_file = cfg, outdir = outdir, fastq = c(fastq),
+  annotation = annot, genome_fa = genome, barcodes_file = barcodes
+)
+pipeline <- run_FLAMES(pipeline)
+saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
+EOF
+  singularity exec -e --bind path/to:path/to "$FLAMES_SIF" Rscript "$outdir/run_flames.R"
+}
+
+prepare_align2genome() {
+  local src="$OUT/flames_align/align2genome.bam"
+  [[ -f "$src" ]]
+  activate lraa
+  local header
+  header=$(samtools view -H "$src" | awk '$1=="@HD"{print; exit}')
+  if [[ "$header" == *SO:coordinate* ]]; then
+    cp -a "$src" "$OUT/align2genome.bam"
+    if [[ -f "${src}.bai" ]]; then
+      cp -a "${src}.bai" "$OUT/align2genome.bam.bai"
+    else
+      samtools index "$OUT/align2genome.bam"
+    fi
+  else
+    samtools sort -@ "$THREADS" -o "$OUT/align2genome.bam" "$src"
+    samtools index "$OUT/align2genome.bam"
+  fi
+}
+
+run_lraa() {
+  activate lraa
+  samtools index "$OUT/align2genome.bam"
+  LRAA \
+    --genome "$GENOME" \
+    --bam "$OUT/align2genome.bam" \
+    --gtf "$REF_GTF" \
+    --output_prefix "$OUT/extended_annotation" \
+    --cell_barcode_tag CB \
+    --read_umi_tag UB \
+    --num_parallel_contigs 4 \
+    --num_threads_per_worker "$THREADS" \
+    --oversimplify chrM \
+    --HiFi
+  ANNOT="$OUT/extended_annotation.gtf"
+  [[ -s "$ANNOT" ]]
+}
+
+convert_matrix() {
+  activate miniTEQuant
+  python - "$1" "$2" <<'PY'
+import sys
+from pathlib import Path
+from scipy import io, sparse
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+dst.mkdir(parents=True, exist_ok=True)
+prefix = next(src.glob("*.count.mtx")).name[: -len(".count.mtx")]
+barcodes = [x for x in (src / f"{prefix}.barcodes.txt").read_text().splitlines() if x]
+features = [ln.split("\t", 1)[0] for ln in (src / f"{prefix}.features.txt").read_text().splitlines() if ln]
+matrix = io.mmread(src / f"{prefix}.count.mtx").tocsr()
+if matrix.shape == (len(barcodes), len(features)):
+    matrix = matrix.T.tocsr()
+if matrix.shape != (len(features), len(barcodes)):
+    raise SystemExit(f"Unexpected matrix shape {matrix.shape}")
+(dst / "barcodes.tsv").write_text("\n".join(barcodes) + "\n")
+(dst / "features.tsv").write_text("\n".join(features) + "\n")
+io.mmwrite(dst / "matrix.mtx", sparse.coo_matrix(matrix))
+PY
+}
+
+run_te() {
+  activate miniTEQuant
+  if [[ ! -s "$TE_GTF" ]]; then
+    python "$MINITE/isoform_quantification/TE_analyse/create_simple_TE_gtf.py" \
+      -i "$REPEATMASKER" -o "$TE_GTF"
+  fi
+  python "$MINITE/isoform_quantification/main.py" cal_TE \
+    -gtf "$ANNOT" -te_gtf "$TE_GTF" \
+    --custom_sc_quant "$OUT/filtered_feature_bc_matrix" \
+    -t "$THREADS" -o "$OUT/te_quant"
+}
+
+classify() {
+  activate miniTEQuant
+  QUANT_DIR="$OUT/filtered_feature_bc_matrix" \
+  CLASS_FILE="$OUT/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv" \
+  OUT_FILE="$OUT/transcript_class_counts.tsv" \
+  MAP_FILE="$OUT/transcript_class_map.tsv" \
+  UNMATCHED_FILE="$OUT/unmatched_transcripts.txt" \
+  python - <<'PY'
+import gzip, os, re
+from pathlib import Path
+import numpy as np, pandas as pd
+from scipy import io
+quant_dir = Path(os.environ["QUANT_DIR"])
+def open_text(path):
+    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
+def locate(stem):
+    for name in (stem, stem + ".gz"):
+        candidate = quant_dir / name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(quant_dir / stem)
+def strip_version(identifier):
+    return re.sub(r"\.\d+$", "", identifier)
+barcodes = [ln.strip() for ln in open_text(locate("barcodes.tsv")) if ln.strip()]
+features = []
+with open_text(locate("features.tsv")) as handle:
+    for line in handle:
+        fields = line.rstrip("\n").split("\t")
+        if fields and fields[0]:
+            features.append(fields[0])
+matrix = io.mmread(locate("matrix.mtx")).tocsr()
+if matrix.shape == (len(barcodes), len(features)):
+    matrix = matrix.T.tocsr()
+if matrix.shape != (len(features), len(barcodes)):
+    raise SystemExit(f"Matrix shape {matrix.shape} does not match {len(features)} transcripts by {len(barcodes)} cells")
+table = pd.read_csv(os.environ["CLASS_FILE"], sep="\t", header=None, dtype=str, keep_default_na=False)
+if table.shape[1] < 11:
+    raise SystemExit("cell_transcript_classification_counts.tsv has fewer than 11 columns")
+if table.iloc[0, 10].strip().lower() in {"classification", "transcript_classification", "class"}:
+    table = table.iloc[1:].reset_index(drop=True)
+class_by_id, class_by_stripped = {}, {}
+for transcript_id, transcript_class in zip(table.iloc[:, 0], table.iloc[:, 10]):
+    transcript_id, transcript_class = transcript_id.strip(), transcript_class.strip()
+    if transcript_id and transcript_class:
+        class_by_id[transcript_id] = transcript_class
+        class_by_stripped.setdefault(strip_version(transcript_id), transcript_class)
+labels = []
+for transcript_id in features:
+    label = class_by_id.get(transcript_id)
+    if label is None:
+        label = class_by_stripped.get(strip_version(transcript_id))
+    labels.append(label)
+assignment = pd.DataFrame({"transcript_id": features, "class": labels})
+assignment.to_csv(os.environ["MAP_FILE"], sep="\t", index=False)
+assignment.loc[assignment["class"].isna(), "transcript_id"].to_csv(os.environ["UNMATCHED_FILE"], index=False, header=False)
+preferred = ["Gene-alone", "TE-alone", "TE-Gene"]
+present = [label for label in preferred if (assignment["class"] == label).any()]
+present += sorted(set(assignment["class"].dropna()) - set(preferred))
+if not present:
+    raise SystemExit("No quantification-matrix transcript matched a class")
+rows = []
+for label in present:
+    positions = [i for i, value in enumerate(labels) if value == label]
+    rows.append(np.asarray(matrix[positions].sum(axis=0)).ravel().astype(int))
+counts = pd.DataFrame(rows, index=present, columns=barcodes)
+counts.index.name = "class"
+counts.to_csv(os.environ["OUT_FILE"], sep="\t")
+print(f"Matched transcripts: {assignment['class'].notna().sum()} / {len(features)}")
+PY
+}
+
+mkdir -p "$OUT"
+run_fastplong
+run_flames "$OUT/flames_align" "$REF_GTF"
+prepare_align2genome
+run_lraa
+run_flames "$OUT/flames_output" "$ANNOT"
+convert_matrix "$OUT/flames_output" "$OUT/filtered_feature_bc_matrix"
+run_te
+classify
+echo "PacBio LRAA results: $OUT/align2genome.bam $OUT/extended_annotation.gtf $OUT/filtered_feature_bc_matrix $OUT/te_quant/Custom_SC_TE_output $OUT/transcript_class_counts.tsv"
+```
+
+### PacBio, Bambu-pipe discovery
+
+FLAMESv2 first assigns barcodes and writes `path/to/PacBio/Bambu-pipe/flames_align/align2genome.bam`. Bambu-pipe then reads `path/to/PacBio/test_filtered.fastq.gz`. Its annotation is saved as `path/to/PacBio/Bambu-pipe/extended_annotation.gtf` and quantified by a second FLAMESv2 run.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(conda info --base)/etc/profile.d/conda.sh"
+export PATH="$HOME/.local/bin:${PATH}"
+
+activate() { set +u; conda activate "$1"; set -u; }
+
+THREADS=8
+CHEMISTRY="10x3v3"
+
+FASTQ=path/to/PacBio/test.fastq
+FILTERED=path/to/PacBio/test_filtered.fastq.gz
+HTML=path/to/PacBio/test_filtered_report.html
+JSON=path/to/PacBio/test_filtered_report.json
+GENOME=path/to/genome.fa
+REF_GTF=path/to/genes.gtf
+BARCODES=path/to/barcodes.txt
+REPEATMASKER=path/to/repeatmasker.out
+TE_GTF=path/to/TE_annotation.gtf
+FLAMES_SIF=path/to/flames.sif
+MINITE=path/to/miniTEQuant
+BAMBU_DIR=path/to/bambu-pipe
+OUT=path/to/PacBio/Bambu-pipe
+ANNOT="$REF_GTF"
+
+run_fastplong() {
+  activate fastplong
+  fastplong -i "$FASTQ" -o "$FILTERED" -h "$HTML" -j "$JSON" -m 20 -l 100 -w "$THREADS" -A
+}
+
+run_flames() {
+  local outdir="$1" annot="$2"
+  mkdir -p "$outdir"
+  cat > "$outdir/run_flames.R" <<EOF
+options(bspm.sudo = TRUE)
+basilisk::setBasiliskFork(FALSE)
+suppressPackageStartupMessages(library(FLAMES))
+outdir   <- "${outdir}"
+fastq    <- "${FILTERED}"
+annot    <- "${annot}"
+genome   <- "${GENOME}"
+barcodes <- "${BARCODES}"
+threads  <- ${THREADS}
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+cfg <- create_config(
+  outdir,
+  pipeline_parameters.demultiplexer = "flexiplex",
+  do_isoform_identification = FALSE,
+  bambu_isoform_identification = FALSE,
+  oarfish_quantification = TRUE,
+  threads = threads
+)
+pipeline <- SingleCellPipeline(
+  config_file = cfg, outdir = outdir, fastq = c(fastq),
+  annotation = annot, genome_fa = genome, barcodes_file = barcodes
+)
+pipeline <- run_FLAMES(pipeline)
+saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
+EOF
+  singularity exec -e --bind path/to:path/to "$FLAMES_SIF" Rscript "$outdir/run_flames.R"
+}
+
+run_bambu() {
+  cat > "$OUT/samplesheet.csv" <<EOF
+sample,path,chemistry,technology
+test,${FILTERED},${CHEMISTRY},PacBio
+EOF
+  nextflow run "$BAMBU_DIR/main.nf" \
+    --input "$OUT/samplesheet.csv" \
+    --genome "$GENOME" \
+    --annotation "$REF_GTF" \
+    --output_dir "$OUT/bambu_output" \
+    --chemistry "$CHEMISTRY" \
+    --technology PacBio \
+    --qscore_filtering false \
+    --quantification_mode no_quant \
+    -profile singularity,local \
+    -work-dir "$OUT/bambu_work" \
+    -resume
+  cp "$OUT/bambu_output/extended_annotations.gtf" "$OUT/extended_annotation.gtf"
+  ANNOT="$OUT/extended_annotation.gtf"
+}
+
+convert_matrix() {
+  activate miniTEQuant
+  python - "$1" "$2" <<'PY'
+import sys
+from pathlib import Path
+from scipy import io, sparse
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+dst.mkdir(parents=True, exist_ok=True)
+prefix = next(src.glob("*.count.mtx")).name[: -len(".count.mtx")]
+barcodes = [x for x in (src / f"{prefix}.barcodes.txt").read_text().splitlines() if x]
+features = [ln.split("\t", 1)[0] for ln in (src / f"{prefix}.features.txt").read_text().splitlines() if ln]
+matrix = io.mmread(src / f"{prefix}.count.mtx").tocsr()
+if matrix.shape == (len(barcodes), len(features)):
+    matrix = matrix.T.tocsr()
+if matrix.shape != (len(features), len(barcodes)):
+    raise SystemExit(f"Unexpected matrix shape {matrix.shape}")
+(dst / "barcodes.tsv").write_text("\n".join(barcodes) + "\n")
+(dst / "features.tsv").write_text("\n".join(features) + "\n")
+io.mmwrite(dst / "matrix.mtx", sparse.coo_matrix(matrix))
+PY
+}
+
+run_te() {
+  activate miniTEQuant
+  if [[ ! -s "$TE_GTF" ]]; then
+    python "$MINITE/isoform_quantification/TE_analyse/create_simple_TE_gtf.py" \
+      -i "$REPEATMASKER" -o "$TE_GTF"
+  fi
+  python "$MINITE/isoform_quantification/main.py" cal_TE \
+    -gtf "$ANNOT" -te_gtf "$TE_GTF" \
+    --custom_sc_quant "$OUT/filtered_feature_bc_matrix" \
+    -t "$THREADS" -o "$OUT/te_quant"
+}
+
+classify() {
+  activate miniTEQuant
+  QUANT_DIR="$OUT/filtered_feature_bc_matrix" \
+  CLASS_FILE="$OUT/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv" \
+  OUT_FILE="$OUT/transcript_class_counts.tsv" \
+  MAP_FILE="$OUT/transcript_class_map.tsv" \
+  UNMATCHED_FILE="$OUT/unmatched_transcripts.txt" \
+  python - <<'PY'
+import gzip, os, re
+from pathlib import Path
+import numpy as np, pandas as pd
+from scipy import io
+quant_dir = Path(os.environ["QUANT_DIR"])
+def open_text(path):
+    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
+def locate(stem):
+    for name in (stem, stem + ".gz"):
+        candidate = quant_dir / name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(quant_dir / stem)
+def strip_version(identifier):
+    return re.sub(r"\.\d+$", "", identifier)
+barcodes = [ln.strip() for ln in open_text(locate("barcodes.tsv")) if ln.strip()]
+features = []
+with open_text(locate("features.tsv")) as handle:
+    for line in handle:
+        fields = line.rstrip("\n").split("\t")
+        if fields and fields[0]:
+            features.append(fields[0])
+matrix = io.mmread(locate("matrix.mtx")).tocsr()
+if matrix.shape == (len(barcodes), len(features)):
+    matrix = matrix.T.tocsr()
+if matrix.shape != (len(features), len(barcodes)):
+    raise SystemExit(f"Matrix shape {matrix.shape} does not match {len(features)} transcripts by {len(barcodes)} cells")
+table = pd.read_csv(os.environ["CLASS_FILE"], sep="\t", header=None, dtype=str, keep_default_na=False)
+if table.shape[1] < 11:
+    raise SystemExit("cell_transcript_classification_counts.tsv has fewer than 11 columns")
+if table.iloc[0, 10].strip().lower() in {"classification", "transcript_classification", "class"}:
+    table = table.iloc[1:].reset_index(drop=True)
+class_by_id, class_by_stripped = {}, {}
+for transcript_id, transcript_class in zip(table.iloc[:, 0], table.iloc[:, 10]):
+    transcript_id, transcript_class = transcript_id.strip(), transcript_class.strip()
+    if transcript_id and transcript_class:
+        class_by_id[transcript_id] = transcript_class
+        class_by_stripped.setdefault(strip_version(transcript_id), transcript_class)
+labels = []
+for transcript_id in features:
+    label = class_by_id.get(transcript_id)
+    if label is None:
+        label = class_by_stripped.get(strip_version(transcript_id))
+    labels.append(label)
+assignment = pd.DataFrame({"transcript_id": features, "class": labels})
+assignment.to_csv(os.environ["MAP_FILE"], sep="\t", index=False)
+assignment.loc[assignment["class"].isna(), "transcript_id"].to_csv(os.environ["UNMATCHED_FILE"], index=False, header=False)
+preferred = ["Gene-alone", "TE-alone", "TE-Gene"]
+present = [label for label in preferred if (assignment["class"] == label).any()]
+present += sorted(set(assignment["class"].dropna()) - set(preferred))
+if not present:
+    raise SystemExit("No quantification-matrix transcript matched a class")
+rows = []
+for label in present:
+    positions = [i for i, value in enumerate(labels) if value == label]
+    rows.append(np.asarray(matrix[positions].sum(axis=0)).ravel().astype(int))
+counts = pd.DataFrame(rows, index=present, columns=barcodes)
+counts.index.name = "class"
+counts.to_csv(os.environ["OUT_FILE"], sep="\t")
+print(f"Matched transcripts: {assignment['class'].notna().sum()} / {len(features)}")
+PY
+}
+
+mkdir -p "$OUT"
+run_fastplong
+run_flames "$OUT/flames_align" "$REF_GTF"
+run_bambu
+run_flames "$OUT/flames_output" "$ANNOT"
+convert_matrix "$OUT/flames_output" "$OUT/filtered_feature_bc_matrix"
+run_te
+classify
+echo "PacBio Bambu-pipe results: $OUT/flames_align/align2genome.bam $OUT/extended_annotation.gtf $OUT/filtered_feature_bc_matrix $OUT/te_quant/Custom_SC_TE_output $OUT/transcript_class_counts.tsv"
+```
+
 ## Reproducibility
 
 The recommended workflow is defined by the following versions and settings.
