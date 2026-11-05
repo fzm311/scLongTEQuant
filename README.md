@@ -1,6 +1,6 @@
 # scLongTEQuant
 
-**Benchmarking, workflow recommendations, and reproducible scripts for transposable element (TE)-derived and TE-associated transcript quantification from single-cell long-read RNA-seq**
+**Systematic benchmarking and reproducible workflows for isoform and transposable element quantification in single-cell long-read transcriptomics**
 
 ## Overview
 
