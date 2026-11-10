@@ -1,2 +1,2 @@
 sample,path,chemistry,technology
-ONT,/home/lijiaying/00000-fzm/test/01-test-data/ONT/test.fastq,10x3v3,ONT
+tagged,results/ONT/Bambu-pipe/tagged.bam,10x3v3,ONT
