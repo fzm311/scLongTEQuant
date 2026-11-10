@@ -1,0 +1,4 @@
+# Larger than GitHub's 100 MB file limit. Keep local copies only.
+test/02-reference/fasta/genome.fa
+test/02-reference/genes/genes.gtf
+test/02-reference/TE-annotation/hg38_filtered_chromosomes.gtf

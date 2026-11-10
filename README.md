@@ -37,14 +37,15 @@ The commands below target a Linux environment. Create a working directory and su
 
 ### Prerequisites
 
-Install a Conda distribution such as [Miniforge](https://github.com/conda-forge/miniforge) before creating the environments below. Four additional components are required alongside FLAMESv2, LRAA, wf-single-cell, and Bambu-pipe.
+Install a Conda distribution such as [Miniforge](https://github.com/conda-forge/miniforge) before creating the environments below. Five additional components are required alongside FLAMESv2, LRAA, wf-single-cell, and Bambu-pipe.
 
 #### Java and Nextflow
 
-[wf-single-cell](https://github.com/epi2me-labs/wf-single-cell) v3.3.4 requires Nextflow >= 23.04.2. [Bambu-pipe](https://github.com/GoekeLab/bambu-pipe) v0.9.1 requires Nextflow >= 26.04.0 and therefore determines the version installed here. Nextflow requires Bash >= 3.2 and Java 17–26 ([installation guide](https://docs.seqera.io/nextflow/install)).
+[wf-single-cell](https://github.com/epi2me-labs/wf-single-cell) v3.3.4 requires Nextflow >= 23.04.2. [Bambu-pipe](https://github.com/GoekeLab/bambu-pipe) v0.9.1 requires Nextflow >= 26.04.0. The commands below install Nextflow 26.04.4. Nextflow requires Bash >= 3.2 and Java 17–26 ([installation guide](https://docs.seqera.io/nextflow/install)). `NXF_VER` selects that release when the launcher runs, so keep it set in each shell that executes Nextflow.
 
 ```bash
 conda install -y -c conda-forge openjdk=17
+export NXF_VER=26.04.4
 curl -s https://get.nextflow.io | bash
 chmod +x nextflow
 mkdir -p "$HOME/.local/bin"
@@ -92,6 +93,23 @@ conda activate miniTEQuant
 
 The upstream installation additionally provides minimap2, flexiplex, and nailpolish for analyses in which miniTEQuant itself demultiplexes, aligns, and quantifies reads. In the workflow recommended here those operations are performed by wf-single-cell and FLAMESv2, so the environment created above is sufficient for `create_simple_TE_gtf.py` and `cal_TE`.
 
+#### RepeatMasker
+
+[RepeatMasker](https://www.repeatmasker.org/RepeatMasker/) 4.2.4 screens `path/to/genome.fa` and writes the annotation table that miniTEQuant converts to a TE GTF. The Bioconda package installs RMBlast, TRF, HMMER, and FamDB 3.0.0. RepeatMasker 4.2.4 does not include the Dfam sequences. Download the Dfam 4.0 root partition and the curated consensus partition into the FamDB data directory. RMBlast searches those consensus sequences.
+
+```bash
+conda create -n repeatmasker -y -c bioconda -c conda-forge repeatmasker=4.2.4 famdb=3.0.0
+conda activate repeatmasker
+FDB_DIR="$(conda info --base)/envs/repeatmasker/share/famdb-3.0.0/Libraries/famdb"
+mkdir -p "$FDB_DIR"
+curl -fsSL -o "$FDB_DIR/dfam40.0.h5.gz" \
+    https://www.dfam.org/releases/Dfam_4.0/families/FamDB/dfam40.0.h5.gz
+curl -fsSL -o "$FDB_DIR/dfam40.curated.consensus.0.h5.gz" \
+    https://www.dfam.org/releases/Dfam_4.0/families/FamDB/dfam40.curated.consensus.0.h5.gz
+gunzip -f "$FDB_DIR/dfam40.0.h5.gz" "$FDB_DIR/dfam40.curated.consensus.0.h5.gz"
+famdb.py info
+```
+
 ### FLAMESv2
 
 Pull the Singularity image shown in [Prerequisites](#singularity). The image already contains the FLAMES R package, flexiplex, minimap2, samtools, and Oarfish used by `SingleCellPipeline`. Enter the image to confirm that the package loads:
@@ -107,12 +125,11 @@ Documentation: [mritchielab/FLAMES](https://github.com/mritchielab/FLAMES) and t
 [LRAA](https://github.com/MethodsDev/LongReadAlignmentAssembler) v0.15.0 is used for reference-guided novel-isoform discovery. The tagged release contains the `LRAA` executable. Its Python and alignment dependencies are installed in a dedicated environment.
 
 ```bash
-git clone --branch LRAA_v0.15.0 --recursive \
-    https://github.com/MethodsDev/LongReadAlignmentAssembler.git \
-    path/to/LongReadAlignmentAssembler
-cd path/to/LongReadAlignmentAssembler
+wget wget https://github.com/MethodsDev/LongReadAlignmentAssembler/archive/refs/tags/LRAA_v0.15.0.tar.gz
+tar -xzvf LRAA_v0.15.0.tar.gz
+cd path/to/LongReadAlignmentAssembler-LRAA_v0.15.0  
 chmod +x LRAA
-export PATH="path/to/LongReadAlignmentAssembler:$PATH"
+export PATH="path/to/LongReadAlignmentAssembler-LRAA_v0.15.0:$PATH"
 
 conda create -n lraa -y python=3.10
 conda activate lraa
@@ -132,19 +149,53 @@ nextflow pull epi2me-labs/wf-single-cell -r v3.3.4
 nextflow run epi2me-labs/wf-single-cell -r v3.3.4 --help
 ```
 
-The workflow downloads its own containers when `-profile singularity` is set. The reference directory must follow the 10x layout documented by [epi2me-labs/wf-single-cell](https://github.com/epi2me-labs/wf-single-cell): `path/to/ref_genome_dir/fasta/genome.fa` and `path/to/ref_genome_dir/genes/genes.gtf`. These two files are `path/to/genome.fa` and `path/to/genes.gtf`.
+When `-profile singularity` is set, the workflow would normally download its own containers. In this project, however, the two required Singularity image files, `wf-single-cell.sif` and `wf-common.sif`, are included and were obtained from the official source. Therefore, before executing the workflow, edit the Nextflow configuration file generated by the pull step:
+
+```bash
+.nextflow/assets/epi2me-labs/wf-single-cell/nextflow.config
+```
+
+In the `process` block located below the comment `// other profiles may override.`, replace the container specifications `ontresearch/wf-single-cell:${params.wf.container_sha}` and `ontresearch/wf-common:${params.wf.common_sha}` with the absolute paths to `wf-single-cell.sif` and `wf-common.sif`, respectively. The absolute paths can be obtained with `realpath`; replace the placeholders below with the actual paths on the local system:
+
+```groovy
+// other profiles may override.
+process {
+    withLabel:singlecell {
+        container = "/absolute/path/to/wf-single-cell.sif"
+    }
+    withLabel:wf_common {
+        container = "/absolute/path/to/wf-common.sif"
+    }
+    withLabel:ctat_lr_fusion {
+        container = "trinityctat/ctat_lr_fusion:1.1.0"
+    }
+    shell = ['/bin/bash', '-euo', 'pipefail']
+}
+```
+
+The `ctat_lr_fusion` container specification and the `shell` directive remain unchanged. The reference directory must follow the 10x layout documented by [epi2me-labs/wf-single-cell](https://github.com/epi2me-labs/wf-single-cell): `path/to/ref_genome_dir/fasta/genome.fa` and `path/to/ref_genome_dir/genes/genes.gtf`. These two files are `path/to/genome.fa` and `path/to/genes.gtf`.
+
+Note: `nextflow pull` may regenerate or overwrite the contents under `.nextflow/assets`; therefore, the modification to `nextflow.config` must be applied after the pull step. If the workflow is pulled again or the release version is changed, the modification should be reapplied.
 
 ### Bambu-pipe 0.9.1
 
-Clone the v0.9.1 release of [Bambu-pipe](https://github.com/GoekeLab/bambu-pipe). Software dependencies are supplied by the Singularity images that the pipeline requests.
+Clone the v0.9.1 release of [Bambu-pipe](https://github.com/GoekeLab/bambu-pipe).
 
 ```bash
-git clone --branch v0.9.1 --depth 1 \
-    https://github.com/GoekeLab/bambu-pipe.git \
-    path/to/bambu-pipe
-cd path/to/bambu-pipe
+wget https://github.com/GoekeLab/bambu-pipe/archive/refs/tags/v0.9.1.tar.gz
+tar -xzvf v0.9.1.tar.gz
+cd path/to/bambu-pipe-0.9.1
 nextflow run main.nf --help
 ```
+
+Software dependencies are the Singularity images declared in `conf/containers.config`. With `-profile singularity`, Nextflow sets `singularity.enabled = true` and `singularity.autoMounts = true`, and pulls each image itself the first time the corresponding process runs. Pulled images are cached by Nextflow and reused on later runs. The profile also binds the working directory with `--bind ${PWD}`.
+
+| Process label | Image | Used for |
+| --- | --- | --- |
+| `r` | `ghcr.io/ch99l/bambu-pipe-r:latest` | Bambu R package: annotation preparation, transcript discovery, and quantification |
+| `spaceranger` | `quay.io/nf-core/spaceranger:9c5e7dc93c32448e` | Barcode and spatial-coordinate extraction |
+| `minimap2_samtools` | `community.wave.seqera.io/library/minimap2_samtools:b09096fc890429ce` | Genome index and alignment |
+| `preprocess` | `community.wave.seqera.io/library/chopper_cutadapt_flexiplex_pigz:077c3bc67452482c` | FASTQ preprocessing with chopper, cutadapt, flexiplex, and pigz |
 
 Run the pipeline with `-profile singularity`. On a local machine add `,local`; on Slurm add `,hpc`, as described in the repository README.
 
@@ -165,7 +216,7 @@ Paths below are generic. A file that reappears in a later command is written wit
 | `path/to/samplesheet.csv` | Bambu-pipe sample sheet. The header is `sample,path,chemistry,technology`, and `path` points to `path/to/reads_filtered.fastq.gz`. |
 | `path/to/extended_annotation.gtf` | Annotation GTF written by LRAA or by Bambu-pipe when novel isoforms are discovered. |
 | `path/to/flames.sif` | FLAMESv2 Singularity image. |
-| `path/to/repeatmasker.out` | RepeatMasker annotation used to construct the TE GTF. |
+| `path/to/repeatmasker.out` | RepeatMasker `.out` annotation table of `path/to/genome.fa`, copied from `genome.fa.out`. |
 | `path/to/TE_annotation.gtf` | TE annotation GTF produced by miniTEQuant from `path/to/repeatmasker.out`. |
 | `path/to/filtered_feature_bc_matrix` | Transcript-by-cell count matrix in 10x Market Exchange format (`barcodes.tsv`, `features.tsv`, `matrix.mtx`), derived from the FLAMESv2 Oarfish output. |
 
@@ -371,42 +422,37 @@ FLAMESv2 quantifies `path/to/reads_filtered.fastq.gz` against `path/to/barcodes.
 - When novel-isoform discovery was not performed, `annot` is `path/to/genes.gtf`. On PacBio, the FLAMESv2 run that assigned barcodes has already completed this quantification.
 - When novel-isoform discovery was performed, `annot` is `path/to/extended_annotation.gtf`. Run FLAMESv2 again with that annotation. The read file remains `path/to/reads_filtered.fastq.gz`, the whitelist remains `path/to/barcodes.txt`, and the genome remains `path/to/genome.fa`.
 
-Oarfish writes three files into `path/to/flames_output`: `<prefix>.count.mtx`, `<prefix>.features.txt`, and `<prefix>.barcodes.txt`. The count matrix is oriented with cells as rows. Convert it to the 10x Market Exchange layout expected by miniTEQuant, in which `matrix.mtx` has transcripts as rows and cells as columns:
+Oarfish writes three files into `path/to/flames_output`: `oarfish.count.mtx`, `oarfish.features.txt`, and `oarfish.barcodes.txt`. Copy them into a directory and rename them to the 10x Market Exchange filenames:
 
 ```bash
-conda activate miniTEQuant
-python - <<'PY'
-from pathlib import Path
-from scipy import io, sparse
-
-src = Path("path/to/flames_output")
-dst = Path("path/to/filtered_feature_bc_matrix")
-dst.mkdir(parents=True, exist_ok=True)
-
-prefix = next(src.glob("*.count.mtx")).name[: -len(".count.mtx")]
-barcodes = (src / f"{prefix}.barcodes.txt").read_text().splitlines()
-features = [
-    line.split("\t", 1)[0]
-    for line in (src / f"{prefix}.features.txt").read_text().splitlines()
-    if line
-]
-matrix = io.mmread(src / f"{prefix}.count.mtx").tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(f"Unexpected matrix shape {matrix.shape}")
-
-(dst / "barcodes.tsv").write_text("\n".join(barcodes) + "\n")
-(dst / "features.tsv").write_text("\n".join(features) + "\n")
-io.mmwrite(dst / "matrix.mtx", sparse.coo_matrix(matrix))
-PY
+cd path/to/flames_output
+mkdir -p path/to/filtered_feature_bc_matrix
+cp oarfish.barcodes.txt oarfish.features.txt oarfish.count.mtx path/to/filtered_feature_bc_matrix
+cd path/to/filtered_feature_bc_matrix
+mv oarfish.barcodes.txt barcodes.tsv
+mv oarfish.features.txt features.tsv
+mv oarfish.count.mtx matrix.mtx
 ```
 
 `path/to/filtered_feature_bc_matrix` is the quantification matrix used for TE quantification and transcript classification. Transcript identifiers in `features.tsv` are the identifiers assigned under the annotation supplied to FLAMESv2.
 
 ### TE Locus and Subfamily-Level Quantification
 
-Build the TE annotation once from the RepeatMasker output, then quantify TE loci and subfamilies with `cal_TE`. The transcript GTF must be the annotation used for the count matrix: `path/to/genes.gtf`, or `path/to/extended_annotation.gtf` after novel-isoform discovery.
+Screen `path/to/genome.fa` once with RepeatMasker. `-species` is the organism of that genome. The reference used with the `chrM` contig name is human, so the value is `human`. RepeatMasker writes `genome.fa.out` under `path/to/repeatmasker_output`. Copy that annotation table to `path/to/repeatmasker.out`.
+
+```bash
+conda activate repeatmasker
+mkdir -p path/to/repeatmasker_output
+RepeatMasker \
+    -species human \
+    -engine rmblast \
+    -pa "$THREADS" \
+    -dir path/to/repeatmasker_output \
+    path/to/genome.fa
+cp path/to/repeatmasker_output/genome.fa.out path/to/repeatmasker.out
+```
+
+`path/to/repeatmasker.out` is the `.out` table read by `create_simple_TE_gtf.py`. Sequence names in the table are the names in `path/to/genome.fa`. Build the TE annotation from this file, then quantify TE loci and subfamilies with `cal_TE`. The transcript GTF must be the annotation used for the count matrix: `path/to/genes.gtf`, or `path/to/extended_annotation.gtf` after novel-isoform discovery.
 
 ```bash
 conda activate miniTEQuant
@@ -426,11 +472,11 @@ python isoform_quantification/main.py cal_TE \
 
 When the count matrix was generated with `path/to/extended_annotation.gtf`, pass that same file to `-gtf` in place of `path/to/genes.gtf`.
 
-Per-cell results are written to `path/to/te_quant/Custom_SC_TE_output`:
+`cal_TE` writes `path/to/te_quant/transcript_quantification_with_TE.tsv` for every transcript in the GTF. The `transcript_id` column is the transcript identifier, and `transcript_classification` is `Gene-alone`, `TE-alone`, or `TE-Gene`. Per-cell results are written to `path/to/te_quant/Custom_SC_TE_output`:
 
 | File | Content |
 | --- | --- |
-| `cell_transcript_classification_counts.tsv` | Transcript records used for classification. Column 1 is the transcript identifier from the GTF, and column 11 is its class. |
+| `cell_transcript_classification_counts.tsv` | Per-cell transcript records. Column 1 is the transcript identifier from the GTF, and column 11 is its class. |
 | `cell_te_class_counts.tsv` | Counts aggregated to TE class. |
 | `cell_te_family_counts.tsv` | Counts aggregated to TE family. |
 | `cell_te_subfamily_counts_barcodes.tsv` | Cell barcodes for the subfamily matrix. |
@@ -444,220 +490,100 @@ The subfamily and locus matrices follow the Market Exchange convention, with fea
 
 ### Transcript Classification
 
-`path/to/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv` classifies transcripts that are present in the GTF passed to `cal_TE`. The first column is the transcript identifier and the eleventh column is the class (`Gene-alone`, `TE-alone`, or `TE-Gene`). These identifiers are annotation identifiers. They are matched to the transcript identifiers in `path/to/filtered_feature_bc_matrix/features.tsv` before counts are summed within each class. An exact match is accepted first. A remaining identifier is matched after removal of a trailing Ensembl version suffix, so that `ENST00000448958` and `ENST00000448958.2` refer to the same transcript. Counts of matched transcripts are then summed, producing one quantification matrix per transcript class.
+After the 10x matrix and `path/to/te_quant/transcript_quantification_with_TE.tsv` have been written, `split_by_transcript_classification.py` splits the matrix into Gene-alone, TE-alone, and TE–Gene. The first field of each `features.tsv` row is matched to `transcript_id`. A transcript that does not carry one of those three labels is written to `others`. Plain text and gzip-compressed inputs are both accepted. The command below is run from the matrix directory and uses the gzip-compressed files.
 
 ```bash
-conda activate miniTEQuant
-python - <<'PY'
-import gzip
-import re
-from pathlib import Path
-
-import numpy as np
-import pandas as pd
-from scipy import io
-
-quant_dir = Path("path/to/filtered_feature_bc_matrix")
-class_file = Path(
-    "path/to/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv"
-)
-out_file = Path("path/to/transcript_class_counts.tsv")
-map_file = Path("path/to/transcript_class_map.tsv")
-unmatched_file = Path("path/to/unmatched_transcripts.txt")
-
-
-def open_text(path):
-    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
-
-
-def locate(stem):
-    for name in (stem, stem + ".gz"):
-        candidate = quant_dir / name
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(quant_dir / stem)
-
-
-def strip_version(identifier):
-    return re.sub(r"\.\d+$", "", identifier)
-
-
-barcodes = [line.strip() for line in open_text(locate("barcodes.tsv")) if line.strip()]
-features = []
-with open_text(locate("features.tsv")) as handle:
-    for line in handle:
-        fields = line.rstrip("\n").split("\t")
-        if fields and fields[0]:
-            features.append(fields[0])
-
-matrix = io.mmread(locate("matrix.mtx")).tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(
-        f"Matrix shape {matrix.shape} does not match "
-        f"{len(features)} transcripts by {len(barcodes)} cells"
-    )
-
-table = pd.read_csv(class_file, sep="\t", header=None, dtype=str, keep_default_na=False)
-if table.shape[1] < 11:
-    raise SystemExit("cell_transcript_classification_counts.tsv has fewer than 11 columns")
-if table.iloc[0, 10].strip().lower() in {
-    "classification",
-    "transcript_classification",
-    "class",
-}:
-    table = table.iloc[1:].reset_index(drop=True)
-
-class_by_id = {}
-class_by_stripped = {}
-for transcript_id, transcript_class in zip(table.iloc[:, 0], table.iloc[:, 10]):
-    transcript_id = transcript_id.strip()
-    transcript_class = transcript_class.strip()
-    if transcript_id and transcript_class:
-        class_by_id[transcript_id] = transcript_class
-        class_by_stripped.setdefault(strip_version(transcript_id), transcript_class)
-
-labels = []
-for transcript_id in features:
-    label = class_by_id.get(transcript_id)
-    if label is None:
-        label = class_by_stripped.get(strip_version(transcript_id))
-    labels.append(label)
-
-assignment = pd.DataFrame({"transcript_id": features, "class": labels})
-assignment.to_csv(map_file, sep="\t", index=False)
-unmatched = assignment.loc[assignment["class"].isna(), "transcript_id"]
-unmatched.to_csv(unmatched_file, index=False, header=False)
-
-preferred = ["Gene-alone", "TE-alone", "TE-Gene"]
-present = [label for label in preferred if (assignment["class"] == label).any()]
-present += sorted(set(assignment["class"].dropna()) - set(preferred))
-
-rows = []
-for label in present:
-    positions = [i for i, value in enumerate(labels) if value == label]
-    summed = np.asarray(matrix[positions].sum(axis=0)).ravel()
-    rows.append(summed.astype(int))
-
-counts = pd.DataFrame(rows, index=present, columns=barcodes)
-counts.index.name = "class"
-counts.to_csv(out_file, sep="\t")
-print(f"Matched transcripts: {assignment['class'].notna().sum()} / {len(features)}")
-print(f"Class counts written to {out_file}")
-PY
+cd path/to/filtered_feature_bc_matrix
+python path/to/split_by_transcript_classification.py \
+    --barcodes ./barcodes.tsv.gz \
+    --features ./features.tsv.gz \
+    --matrix ./matrix.mtx.gz \
+    --quant path/to/te_quant/transcript_quantification_with_TE.tsv
 ```
 
-`path/to/transcript_class_counts.tsv` contains cell-level counts for Gene-alone, TE-alone, and TE–gene chimeric transcripts. `path/to/transcript_class_map.tsv` records the identifier match, and `path/to/unmatched_transcripts.txt` lists quantification-matrix transcripts that remain without a class. A large unmatched set indicates that `-gtf` in `cal_TE` and the annotation used by FLAMESv2 are different files.
+The script writes `Gene-alone/`, `TE-alone/`, `TE-Gene/`, and `others/` in the directory that contains `matrix.mtx.gz`. Each directory contains the barcode file and the feature and count rows for that class. The same arguments accept the uncompressed `barcodes.tsv`, `features.tsv`, and `matrix.mtx` produced by the Oarfish rename step.
 
 ## Full Pipeline Examples
 
-The six examples below are complete shell scripts. Each one reads one platform-specific FASTQ and writes the transcript matrix, the TE matrices, and the class-level matrix. Save a script and execute it with `bash`.
-
-Shared inputs:
+Run each block from the repository root. Reads, the reference, the barcode whitelist, and the TE annotation come from `test/`. Each route writes its own results under `results/`. `flames.sif` is the FLAMESv2 image from [Installation](#installation-of-recommended-tools), `miniTEQuant/` is the miniTEQuant clone, and `bambu-pipe/` is Bambu-pipe 0.9.1. Comments name the step.
 
 | File | Role |
 | --- | --- |
-| `path/to/ONT/test.fastq` | ONT test reads |
-| `path/to/PacBio/test.fastq` | PacBio test reads |
-| `path/to/genome.fa` | Reference genome |
-| `path/to/genes.gtf` | Reference gene annotation |
-| `path/to/ref_genome_dir` | 10x reference directory for wf-single-cell |
-| `path/to/barcodes.txt` | Cell-barcode whitelist |
-| `path/to/repeatmasker.out` | RepeatMasker output used to build `path/to/TE_annotation.gtf` |
-| `path/to/flames.sif` | FLAMESv2 image |
+| `test/01-test-data/ONT/test.fastq` | ONT test reads |
+| `test/01-test-data/PacBio/test.fastq` | PacBio test reads |
+| `test/02-reference/fasta/genome.fa` | Reference genome |
+| `test/02-reference/genes/genes.gtf` | Reference gene annotation |
+| `test/02-reference` | 10x reference directory for wf-single-cell |
+| `test/01-test-data/barcodes/3M-february-2018.txt` | Cell-barcode whitelist |
+| `test/02-reference/TE-annotation/hg38_filtered_chromosomes.gtf` | TE annotation used by `cal_TE` |
 
-The three ONT scripts share `path/to/ONT/test_filtered.fastq.gz`. The three PacBio scripts share `path/to/PacBio/test_filtered.fastq.gz`. Route-specific results are written under a separate directory. `EXPECTED_CELLS`, `KIT`, and `CHEMISTRY` follow the test library; the values below match 10x Chromium 3' v3.
+`genome.fa`, `genes.gtf`, and `hg38_filtered_chromosomes.gtf` are not in this repository. Each file exceeds GitHub's 100 MB limit. Put local copies at the paths in the table before running the examples.
 
 | Route | Barcode and UMI | Discovery | Annotation passed to FLAMESv2 and `cal_TE` |
 | --- | --- | --- | --- |
-| ONT, reference annotation | wf-single-cell | — | `path/to/genes.gtf` |
-| ONT, LRAA | wf-single-cell | LRAA | `path/to/ONT/LRAA/extended_annotation.gtf` |
-| ONT, Bambu-pipe | wf-single-cell | Bambu-pipe | `path/to/ONT/Bambu-pipe/extended_annotation.gtf` |
-| PacBio, reference annotation | FLAMESv2 | — | `path/to/genes.gtf` |
-| PacBio, LRAA | FLAMESv2 | LRAA | `path/to/PacBio/LRAA/extended_annotation.gtf` |
-| PacBio, Bambu-pipe | FLAMESv2 | Bambu-pipe | `path/to/PacBio/Bambu-pipe/extended_annotation.gtf` |
+| ONT, reference annotation | wf-single-cell | — | `test/02-reference/genes/genes.gtf` |
+| ONT, LRAA | wf-single-cell | LRAA | `results/ONT/LRAA/extended_annotation.gtf` |
+| ONT, Bambu-pipe | wf-single-cell | Bambu-pipe | `results/ONT/Bambu-pipe/extended_annotation.gtf` |
+| PacBio, reference annotation | FLAMESv2 | — | `test/02-reference/genes/genes.gtf` |
+| PacBio, LRAA | FLAMESv2 | LRAA | `results/PacBio/LRAA/extended_annotation.gtf` |
+| PacBio, Bambu-pipe | FLAMESv2 | Bambu-pipe | `results/PacBio/Bambu-pipe/extended_annotation.gtf` |
 
-On the two discovery routes, FLAMESv2 is run again after the extended annotation has been written. On PacBio the first FLAMESv2 run assigns barcodes and, for LRAA, supplies `path/to/PacBio/LRAA/align2genome.bam`. Bambu-pipe reads the filtered FASTQ and writes `extended_annotations.gtf`, which is then stored as `extended_annotation.gtf`.
+On a discovery route, FLAMESv2 is run again after the extended annotation exists. On PacBio the first FLAMESv2 run assigns barcodes and, for LRAA, supplies the genome alignment.
 
 ### ONT, reference annotation
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-source "$(conda info --base)/etc/profile.d/conda.sh"
-export PATH="$HOME/.local/bin:${PATH}"
-
-activate() { set +u; conda activate "$1"; set -u; }
-
+# Run these commands from the repository root
 THREADS=8
-EXPECTED_CELLS=2000
-KIT="3prime:v3"
+export PATH="$HOME/.local/bin:$PATH"
 
-FASTQ=path/to/ONT/test.fastq
-FILTERED=path/to/ONT/test_filtered.fastq.gz
-HTML=path/to/ONT/test_filtered_report.html
-JSON=path/to/ONT/test_filtered_report.json
-GENOME=path/to/genome.fa
-REF_GTF=path/to/genes.gtf
-REF_DIR=path/to/ref_genome_dir
-BARCODES=path/to/barcodes.txt
-REPEATMASKER=path/to/repeatmasker.out
-TE_GTF=path/to/TE_annotation.gtf
-FLAMES_SIF=path/to/flames.sif
-MINITE=path/to/miniTEQuant
-OUT=path/to/ONT/no_discovery
-ANNOT="$REF_GTF"
+# Discard reads with mean quality below 20 or length below 100 bp
+conda activate fastplong
+mkdir -p results/ONT/reference
+fastplong \
+    -i test/01-test-data/ONT/test.fastq \
+    -o results/ONT/reference/test_filtered.fastq.gz \
+    -h results/ONT/reference/test_filtered_report.html \
+    -j results/ONT/reference/test_filtered_report.json \
+    -m 20 \
+    -l 100 \
+    -w "$THREADS" \
+    -A
 
-run_fastplong() {
-  activate fastplong
-  fastplong -i "$FASTQ" -o "$FILTERED" -h "$HTML" -j "$JSON" -m 20 -l 100 -w "$THREADS" -A
-}
-
-run_wf() {
-  mkdir -p "$OUT/wf_output" "$OUT/wf_work"
-  nextflow run epi2me-labs/wf-single-cell -r v3.3.4 \
+# Assign ONT cell barcodes and UMIs, then align reads
+export NXF_VER=26.04.4
+mkdir -p results/ONT/reference/wf_output results/ONT/reference/wf_work
+nextflow run epi2me-labs/wf-single-cell -r v3.3.4 \
     -profile singularity \
-    --fastq "$FILTERED" \
+    --fastq results/ONT/reference/test_filtered.fastq.gz \
     --sample test \
-    --expected_cells "$EXPECTED_CELLS" \
-    --kit "$KIT" \
-    --ref_genome_dir "$REF_DIR" \
-    --out_dir "$OUT/wf_output" \
+    --expected_cells 2000 \
+    --kit '3prime:v3' \
+    --ref_genome_dir test/02-reference \
+    --out_dir results/ONT/reference/wf_output \
     --threads "$THREADS" \
-    -work-dir "$OUT/wf_work" \
+    -work-dir results/ONT/reference/wf_work \
     -resume
-  local src="$OUT/wf_output/test/test.tagged.bam"
-  [[ -f "$src" ]]
-  activate lraa
-  local header
-  header=$(samtools view -H "$src" | awk '$1=="@HD"{print; exit}')
-  if [[ "$header" == *SO:coordinate* ]]; then
-    cp -a "$src" "$OUT/tagged.bam"
-    if [[ -f "${src}.bai" ]]; then
-      cp -a "${src}.bai" "$OUT/tagged.bam.bai"
-    else
-      samtools index "$OUT/tagged.bam"
-    fi
-  else
-    samtools sort -@ "$THREADS" -o "$OUT/tagged.bam" "$src"
-    samtools index "$OUT/tagged.bam"
-  fi
-}
 
-run_flames() {
-  local outdir="$1" annot="$2"
-  mkdir -p "$outdir"
-  cat > "$outdir/run_flames.R" <<EOF
+# Coordinate-sort and index the tagged BAM
+conda activate lraa
+samtools sort -@ "$THREADS" \
+    -o results/ONT/reference/tagged.bam \
+    results/ONT/reference/wf_output/test/test.tagged.bam
+samtools index results/ONT/reference/tagged.bam
+
+# Quantify transcripts with FLAMESv2
+mkdir -p results/ONT/reference/flames_output
+cat > results/ONT/reference/flames_output/run_flames.R <<'EOF'
 options(bspm.sudo = TRUE)
 basilisk::setBasiliskFork(FALSE)
 suppressPackageStartupMessages(library(FLAMES))
-outdir   <- "${outdir}"
-fastq    <- "${FILTERED}"
-annot    <- "${annot}"
-genome   <- "${GENOME}"
-barcodes <- "${BARCODES}"
-threads  <- ${THREADS}
+outdir   <- "results/ONT/reference/flames_output"
+fastq    <- "results/ONT/reference/test_filtered.fastq.gz"
+annot    <- "test/02-reference/genes/genes.gtf"
+genome   <- "test/02-reference/fasta/genome.fa"
+barcodes <- "test/01-test-data/barcodes/3M-february-2018.txt"
+threads  <- 8L
 dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
 cfg <- create_config(
   outdir,
@@ -674,221 +600,104 @@ pipeline <- SingleCellPipeline(
 pipeline <- run_FLAMES(pipeline)
 saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
 EOF
-  singularity exec -e --bind path/to:path/to "$FLAMES_SIF" Rscript "$outdir/run_flames.R"
-}
+singularity exec -e --bind "$PWD:$PWD" flames.sif Rscript results/ONT/reference/flames_output/run_flames.R
 
-convert_matrix() {
-  activate miniTEQuant
-  python - "$1" "$2" <<'PY'
-import sys
-from pathlib import Path
-from scipy import io, sparse
-src, dst = Path(sys.argv[1]), Path(sys.argv[2])
-dst.mkdir(parents=True, exist_ok=True)
-prefix = next(src.glob("*.count.mtx")).name[: -len(".count.mtx")]
-barcodes = [x for x in (src / f"{prefix}.barcodes.txt").read_text().splitlines() if x]
-features = [ln.split("\t", 1)[0] for ln in (src / f"{prefix}.features.txt").read_text().splitlines() if ln]
-matrix = io.mmread(src / f"{prefix}.count.mtx").tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(f"Unexpected matrix shape {matrix.shape}")
-(dst / "barcodes.tsv").write_text("\n".join(barcodes) + "\n")
-(dst / "features.tsv").write_text("\n".join(features) + "\n")
-io.mmwrite(dst / "matrix.mtx", sparse.coo_matrix(matrix))
-PY
-}
+# Rename the Oarfish files to a gzip-compressed 10x matrix
+mkdir -p results/ONT/reference/filtered_feature_bc_matrix
+cp results/ONT/reference/flames_output/oarfish.barcodes.txt results/ONT/reference/filtered_feature_bc_matrix/barcodes.tsv
+cp results/ONT/reference/flames_output/oarfish.features.txt results/ONT/reference/filtered_feature_bc_matrix/features.tsv
+cp results/ONT/reference/flames_output/oarfish.count.mtx results/ONT/reference/filtered_feature_bc_matrix/matrix.mtx
+gzip -c results/ONT/reference/filtered_feature_bc_matrix/barcodes.tsv > results/ONT/reference/filtered_feature_bc_matrix/barcodes.tsv.gz
+gzip -c results/ONT/reference/filtered_feature_bc_matrix/features.tsv > results/ONT/reference/filtered_feature_bc_matrix/features.tsv.gz
+gzip -c results/ONT/reference/filtered_feature_bc_matrix/matrix.mtx > results/ONT/reference/filtered_feature_bc_matrix/matrix.mtx.gz
 
-run_te() {
-  activate miniTEQuant
-  if [[ ! -s "$TE_GTF" ]]; then
-    python "$MINITE/isoform_quantification/TE_analyse/create_simple_TE_gtf.py" \
-      -i "$REPEATMASKER" -o "$TE_GTF"
-  fi
-  python "$MINITE/isoform_quantification/main.py" cal_TE \
-    -gtf "$ANNOT" -te_gtf "$TE_GTF" \
-    --custom_sc_quant "$OUT/filtered_feature_bc_matrix" \
-    -t "$THREADS" -o "$OUT/te_quant"
-}
+# Quantify TE loci and subfamilies
+conda activate miniTEQuant
+python miniTEQuant/isoform_quantification/main.py cal_TE \
+    -gtf test/02-reference/genes/genes.gtf \
+    -te_gtf test/02-reference/TE-annotation/hg38_filtered_chromosomes.gtf \
+    --custom_sc_quant results/ONT/reference/filtered_feature_bc_matrix \
+    -t "$THREADS" \
+    -o results/ONT/reference/te_quant
 
-classify() {
-  activate miniTEQuant
-  QUANT_DIR="$OUT/filtered_feature_bc_matrix" \
-  CLASS_FILE="$OUT/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv" \
-  OUT_FILE="$OUT/transcript_class_counts.tsv" \
-  MAP_FILE="$OUT/transcript_class_map.tsv" \
-  UNMATCHED_FILE="$OUT/unmatched_transcripts.txt" \
-  python - <<'PY'
-import gzip, os, re
-from pathlib import Path
-import numpy as np, pandas as pd
-from scipy import io
-quant_dir = Path(os.environ["QUANT_DIR"])
-def open_text(path):
-    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
-def locate(stem):
-    for name in (stem, stem + ".gz"):
-        candidate = quant_dir / name
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(quant_dir / stem)
-def strip_version(identifier):
-    return re.sub(r"\.\d+$", "", identifier)
-barcodes = [ln.strip() for ln in open_text(locate("barcodes.tsv")) if ln.strip()]
-features = []
-with open_text(locate("features.tsv")) as handle:
-    for line in handle:
-        fields = line.rstrip("\n").split("\t")
-        if fields and fields[0]:
-            features.append(fields[0])
-matrix = io.mmread(locate("matrix.mtx")).tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(f"Matrix shape {matrix.shape} does not match {len(features)} transcripts by {len(barcodes)} cells")
-table = pd.read_csv(os.environ["CLASS_FILE"], sep="\t", header=None, dtype=str, keep_default_na=False)
-if table.shape[1] < 11:
-    raise SystemExit("cell_transcript_classification_counts.tsv has fewer than 11 columns")
-if table.iloc[0, 10].strip().lower() in {"classification", "transcript_classification", "class"}:
-    table = table.iloc[1:].reset_index(drop=True)
-class_by_id, class_by_stripped = {}, {}
-for transcript_id, transcript_class in zip(table.iloc[:, 0], table.iloc[:, 10]):
-    transcript_id, transcript_class = transcript_id.strip(), transcript_class.strip()
-    if transcript_id and transcript_class:
-        class_by_id[transcript_id] = transcript_class
-        class_by_stripped.setdefault(strip_version(transcript_id), transcript_class)
-labels = []
-for transcript_id in features:
-    label = class_by_id.get(transcript_id)
-    if label is None:
-        label = class_by_stripped.get(strip_version(transcript_id))
-    labels.append(label)
-assignment = pd.DataFrame({"transcript_id": features, "class": labels})
-assignment.to_csv(os.environ["MAP_FILE"], sep="\t", index=False)
-assignment.loc[assignment["class"].isna(), "transcript_id"].to_csv(os.environ["UNMATCHED_FILE"], index=False, header=False)
-preferred = ["Gene-alone", "TE-alone", "TE-Gene"]
-present = [label for label in preferred if (assignment["class"] == label).any()]
-present += sorted(set(assignment["class"].dropna()) - set(preferred))
-if not present:
-    raise SystemExit("No quantification-matrix transcript matched a class")
-rows = []
-for label in present:
-    positions = [i for i, value in enumerate(labels) if value == label]
-    rows.append(np.asarray(matrix[positions].sum(axis=0)).ravel().astype(int))
-counts = pd.DataFrame(rows, index=present, columns=barcodes)
-counts.index.name = "class"
-counts.to_csv(os.environ["OUT_FILE"], sep="\t")
-print(f"Matched transcripts: {assignment['class'].notna().sum()} / {len(features)}")
-PY
-}
-
-mkdir -p "$OUT"
-run_fastplong
-run_wf
-run_flames "$OUT/flames_output" "$ANNOT"
-convert_matrix "$OUT/flames_output" "$OUT/filtered_feature_bc_matrix"
-run_te
-classify
-echo "ONT reference-annotation results: $OUT/filtered_feature_bc_matrix $OUT/te_quant/Custom_SC_TE_output $OUT/transcript_class_counts.tsv"
+# Split transcripts into Gene-alone, TE-alone, and TE-Gene
+python split_by_transcript_classification.py \
+    --barcodes results/ONT/reference/filtered_feature_bc_matrix/barcodes.tsv.gz \
+    --features results/ONT/reference/filtered_feature_bc_matrix/features.tsv.gz \
+    --matrix results/ONT/reference/filtered_feature_bc_matrix/matrix.mtx.gz \
+    --quant results/ONT/reference/te_quant/transcript_quantification_with_TE.tsv
 ```
 
 ### ONT, LRAA discovery
 
-LRAA reads `path/to/ONT/LRAA/tagged.bam`. The resulting annotation is `path/to/ONT/LRAA/extended_annotation.gtf`.
+LRAA reads `results/ONT/LRAA/tagged.bam` and writes `results/ONT/LRAA/extended_annotation.gtf`.
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-source "$(conda info --base)/etc/profile.d/conda.sh"
-export PATH="$HOME/.local/bin:path/to/LongReadAlignmentAssembler:${PATH}"
-
-activate() { set +u; conda activate "$1"; set -u; }
-
+# Run these commands from the repository root
 THREADS=8
-EXPECTED_CELLS=2000
-KIT="3prime:v3"
+export PATH="$HOME/.local/bin:$PATH"
 
-FASTQ=path/to/ONT/test.fastq
-FILTERED=path/to/ONT/test_filtered.fastq.gz
-HTML=path/to/ONT/test_filtered_report.html
-JSON=path/to/ONT/test_filtered_report.json
-GENOME=path/to/genome.fa
-REF_GTF=path/to/genes.gtf
-REF_DIR=path/to/ref_genome_dir
-BARCODES=path/to/barcodes.txt
-REPEATMASKER=path/to/repeatmasker.out
-TE_GTF=path/to/TE_annotation.gtf
-FLAMES_SIF=path/to/flames.sif
-MINITE=path/to/miniTEQuant
-OUT=path/to/ONT/LRAA
-ANNOT="$REF_GTF"
+# Discard reads with mean quality below 20 or length below 100 bp
+conda activate fastplong
+mkdir -p results/ONT/LRAA
+fastplong \
+    -i test/01-test-data/ONT/test.fastq \
+    -o results/ONT/LRAA/test_filtered.fastq.gz \
+    -h results/ONT/LRAA/test_filtered_report.html \
+    -j results/ONT/LRAA/test_filtered_report.json \
+    -m 20 \
+    -l 100 \
+    -w "$THREADS" \
+    -A
 
-run_fastplong() {
-  activate fastplong
-  fastplong -i "$FASTQ" -o "$FILTERED" -h "$HTML" -j "$JSON" -m 20 -l 100 -w "$THREADS" -A
-}
-
-run_wf() {
-  mkdir -p "$OUT/wf_output" "$OUT/wf_work"
-  nextflow run epi2me-labs/wf-single-cell -r v3.3.4 \
+# Assign ONT cell barcodes and UMIs, then align reads
+export NXF_VER=26.04.4
+mkdir -p results/ONT/LRAA/wf_output results/ONT/LRAA/wf_work
+nextflow run epi2me-labs/wf-single-cell -r v3.3.4 \
     -profile singularity \
-    --fastq "$FILTERED" \
+    --fastq results/ONT/LRAA/test_filtered.fastq.gz \
     --sample test \
-    --expected_cells "$EXPECTED_CELLS" \
-    --kit "$KIT" \
-    --ref_genome_dir "$REF_DIR" \
-    --out_dir "$OUT/wf_output" \
+    --expected_cells 2000 \
+    --kit '3prime:v3' \
+    --ref_genome_dir test/02-reference \
+    --out_dir results/ONT/LRAA/wf_output \
     --threads "$THREADS" \
-    -work-dir "$OUT/wf_work" \
+    -work-dir results/ONT/LRAA/wf_work \
     -resume
-  local src="$OUT/wf_output/test/test.tagged.bam"
-  [[ -f "$src" ]]
-  activate lraa
-  local header
-  header=$(samtools view -H "$src" | awk '$1=="@HD"{print; exit}')
-  if [[ "$header" == *SO:coordinate* ]]; then
-    cp -a "$src" "$OUT/tagged.bam"
-    if [[ -f "${src}.bai" ]]; then
-      cp -a "${src}.bai" "$OUT/tagged.bam.bai"
-    else
-      samtools index "$OUT/tagged.bam"
-    fi
-  else
-    samtools sort -@ "$THREADS" -o "$OUT/tagged.bam" "$src"
-    samtools index "$OUT/tagged.bam"
-  fi
-}
 
-run_lraa() {
-  activate lraa
-  samtools index "$OUT/tagged.bam"
-  LRAA \
-    --genome "$GENOME" \
-    --bam "$OUT/tagged.bam" \
-    --gtf "$REF_GTF" \
-    --output_prefix "$OUT/extended_annotation" \
+# Coordinate-sort and index the tagged BAM
+conda activate lraa
+samtools sort -@ "$THREADS" \
+    -o results/ONT/LRAA/tagged.bam \
+    results/ONT/LRAA/wf_output/test/test.tagged.bam
+samtools index results/ONT/LRAA/tagged.bam
+
+# Discover isoforms with LRAA
+conda activate lraa
+samtools index results/ONT/LRAA/tagged.bam
+LRAA \
+    --genome test/02-reference/fasta/genome.fa \
+    --bam results/ONT/LRAA/tagged.bam \
+    --gtf test/02-reference/genes/genes.gtf \
+    --output_prefix results/ONT/LRAA/extended_annotation \
     --cell_barcode_tag CB \
     --read_umi_tag UB \
     --num_parallel_contigs 4 \
     --num_threads_per_worker "$THREADS" \
     --oversimplify chrM
-  ANNOT="$OUT/extended_annotation.gtf"
-  [[ -s "$ANNOT" ]]
-}
 
-run_flames() {
-  local outdir="$1" annot="$2"
-  mkdir -p "$outdir"
-  cat > "$outdir/run_flames.R" <<EOF
+# Quantify transcripts with FLAMESv2
+mkdir -p results/ONT/LRAA/flames_output
+cat > results/ONT/LRAA/flames_output/run_flames.R <<'EOF'
 options(bspm.sudo = TRUE)
 basilisk::setBasiliskFork(FALSE)
 suppressPackageStartupMessages(library(FLAMES))
-outdir   <- "${outdir}"
-fastq    <- "${FILTERED}"
-annot    <- "${annot}"
-genome   <- "${GENOME}"
-barcodes <- "${BARCODES}"
-threads  <- ${THREADS}
+outdir   <- "results/ONT/LRAA/flames_output"
+fastq    <- "results/ONT/LRAA/test_filtered.fastq.gz"
+annot    <- "results/ONT/LRAA/extended_annotation.gtf"
+genome   <- "test/02-reference/fasta/genome.fa"
+barcodes <- "test/01-test-data/barcodes/3M-february-2018.txt"
+threads  <- 8L
 dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
 cfg <- create_config(
   outdir,
@@ -905,228 +714,110 @@ pipeline <- SingleCellPipeline(
 pipeline <- run_FLAMES(pipeline)
 saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
 EOF
-  singularity exec -e --bind path/to:path/to "$FLAMES_SIF" Rscript "$outdir/run_flames.R"
-}
+singularity exec -e --bind "$PWD:$PWD" flames.sif Rscript results/ONT/LRAA/flames_output/run_flames.R
 
-convert_matrix() {
-  activate miniTEQuant
-  python - "$1" "$2" <<'PY'
-import sys
-from pathlib import Path
-from scipy import io, sparse
-src, dst = Path(sys.argv[1]), Path(sys.argv[2])
-dst.mkdir(parents=True, exist_ok=True)
-prefix = next(src.glob("*.count.mtx")).name[: -len(".count.mtx")]
-barcodes = [x for x in (src / f"{prefix}.barcodes.txt").read_text().splitlines() if x]
-features = [ln.split("\t", 1)[0] for ln in (src / f"{prefix}.features.txt").read_text().splitlines() if ln]
-matrix = io.mmread(src / f"{prefix}.count.mtx").tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(f"Unexpected matrix shape {matrix.shape}")
-(dst / "barcodes.tsv").write_text("\n".join(barcodes) + "\n")
-(dst / "features.tsv").write_text("\n".join(features) + "\n")
-io.mmwrite(dst / "matrix.mtx", sparse.coo_matrix(matrix))
-PY
-}
+# Rename the Oarfish files to a gzip-compressed 10x matrix
+mkdir -p results/ONT/LRAA/filtered_feature_bc_matrix
+cp results/ONT/LRAA/flames_output/oarfish.barcodes.txt results/ONT/LRAA/filtered_feature_bc_matrix/barcodes.tsv
+cp results/ONT/LRAA/flames_output/oarfish.features.txt results/ONT/LRAA/filtered_feature_bc_matrix/features.tsv
+cp results/ONT/LRAA/flames_output/oarfish.count.mtx results/ONT/LRAA/filtered_feature_bc_matrix/matrix.mtx
+gzip -c results/ONT/LRAA/filtered_feature_bc_matrix/barcodes.tsv > results/ONT/LRAA/filtered_feature_bc_matrix/barcodes.tsv.gz
+gzip -c results/ONT/LRAA/filtered_feature_bc_matrix/features.tsv > results/ONT/LRAA/filtered_feature_bc_matrix/features.tsv.gz
+gzip -c results/ONT/LRAA/filtered_feature_bc_matrix/matrix.mtx > results/ONT/LRAA/filtered_feature_bc_matrix/matrix.mtx.gz
 
-run_te() {
-  activate miniTEQuant
-  if [[ ! -s "$TE_GTF" ]]; then
-    python "$MINITE/isoform_quantification/TE_analyse/create_simple_TE_gtf.py" \
-      -i "$REPEATMASKER" -o "$TE_GTF"
-  fi
-  python "$MINITE/isoform_quantification/main.py" cal_TE \
-    -gtf "$ANNOT" -te_gtf "$TE_GTF" \
-    --custom_sc_quant "$OUT/filtered_feature_bc_matrix" \
-    -t "$THREADS" -o "$OUT/te_quant"
-}
+# Quantify TE loci and subfamilies
+conda activate miniTEQuant
+python miniTEQuant/isoform_quantification/main.py cal_TE \
+    -gtf results/ONT/LRAA/extended_annotation.gtf \
+    -te_gtf test/02-reference/TE-annotation/hg38_filtered_chromosomes.gtf \
+    --custom_sc_quant results/ONT/LRAA/filtered_feature_bc_matrix \
+    -t "$THREADS" \
+    -o results/ONT/LRAA/te_quant
 
-classify() {
-  activate miniTEQuant
-  QUANT_DIR="$OUT/filtered_feature_bc_matrix" \
-  CLASS_FILE="$OUT/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv" \
-  OUT_FILE="$OUT/transcript_class_counts.tsv" \
-  MAP_FILE="$OUT/transcript_class_map.tsv" \
-  UNMATCHED_FILE="$OUT/unmatched_transcripts.txt" \
-  python - <<'PY'
-import gzip, os, re
-from pathlib import Path
-import numpy as np, pandas as pd
-from scipy import io
-quant_dir = Path(os.environ["QUANT_DIR"])
-def open_text(path):
-    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
-def locate(stem):
-    for name in (stem, stem + ".gz"):
-        candidate = quant_dir / name
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(quant_dir / stem)
-def strip_version(identifier):
-    return re.sub(r"\.\d+$", "", identifier)
-barcodes = [ln.strip() for ln in open_text(locate("barcodes.tsv")) if ln.strip()]
-features = []
-with open_text(locate("features.tsv")) as handle:
-    for line in handle:
-        fields = line.rstrip("\n").split("\t")
-        if fields and fields[0]:
-            features.append(fields[0])
-matrix = io.mmread(locate("matrix.mtx")).tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(f"Matrix shape {matrix.shape} does not match {len(features)} transcripts by {len(barcodes)} cells")
-table = pd.read_csv(os.environ["CLASS_FILE"], sep="\t", header=None, dtype=str, keep_default_na=False)
-if table.shape[1] < 11:
-    raise SystemExit("cell_transcript_classification_counts.tsv has fewer than 11 columns")
-if table.iloc[0, 10].strip().lower() in {"classification", "transcript_classification", "class"}:
-    table = table.iloc[1:].reset_index(drop=True)
-class_by_id, class_by_stripped = {}, {}
-for transcript_id, transcript_class in zip(table.iloc[:, 0], table.iloc[:, 10]):
-    transcript_id, transcript_class = transcript_id.strip(), transcript_class.strip()
-    if transcript_id and transcript_class:
-        class_by_id[transcript_id] = transcript_class
-        class_by_stripped.setdefault(strip_version(transcript_id), transcript_class)
-labels = []
-for transcript_id in features:
-    label = class_by_id.get(transcript_id)
-    if label is None:
-        label = class_by_stripped.get(strip_version(transcript_id))
-    labels.append(label)
-assignment = pd.DataFrame({"transcript_id": features, "class": labels})
-assignment.to_csv(os.environ["MAP_FILE"], sep="\t", index=False)
-assignment.loc[assignment["class"].isna(), "transcript_id"].to_csv(os.environ["UNMATCHED_FILE"], index=False, header=False)
-preferred = ["Gene-alone", "TE-alone", "TE-Gene"]
-present = [label for label in preferred if (assignment["class"] == label).any()]
-present += sorted(set(assignment["class"].dropna()) - set(preferred))
-if not present:
-    raise SystemExit("No quantification-matrix transcript matched a class")
-rows = []
-for label in present:
-    positions = [i for i, value in enumerate(labels) if value == label]
-    rows.append(np.asarray(matrix[positions].sum(axis=0)).ravel().astype(int))
-counts = pd.DataFrame(rows, index=present, columns=barcodes)
-counts.index.name = "class"
-counts.to_csv(os.environ["OUT_FILE"], sep="\t")
-print(f"Matched transcripts: {assignment['class'].notna().sum()} / {len(features)}")
-PY
-}
-
-mkdir -p "$OUT"
-run_fastplong
-run_wf
-run_lraa
-run_flames "$OUT/flames_output" "$ANNOT"
-convert_matrix "$OUT/flames_output" "$OUT/filtered_feature_bc_matrix"
-run_te
-classify
-echo "ONT LRAA results: $OUT/extended_annotation.gtf $OUT/filtered_feature_bc_matrix $OUT/te_quant/Custom_SC_TE_output $OUT/transcript_class_counts.tsv"
+# Split transcripts into Gene-alone, TE-alone, and TE-Gene
+python split_by_transcript_classification.py \
+    --barcodes results/ONT/LRAA/filtered_feature_bc_matrix/barcodes.tsv.gz \
+    --features results/ONT/LRAA/filtered_feature_bc_matrix/features.tsv.gz \
+    --matrix results/ONT/LRAA/filtered_feature_bc_matrix/matrix.mtx.gz \
+    --quant results/ONT/LRAA/te_quant/transcript_quantification_with_TE.tsv
 ```
 
 ### ONT, Bambu-pipe discovery
 
-Bambu-pipe reads `path/to/ONT/test_filtered.fastq.gz`. Its `extended_annotations.gtf` is saved as `path/to/ONT/Bambu-pipe/extended_annotation.gtf` and passed to FLAMESv2.
+Bambu-pipe reads the filtered FASTQ and writes `results/ONT/Bambu-pipe/extended_annotation.gtf`.
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-source "$(conda info --base)/etc/profile.d/conda.sh"
-export PATH="$HOME/.local/bin:${PATH}"
-
-activate() { set +u; conda activate "$1"; set -u; }
-
+# Run these commands from the repository root
 THREADS=8
-EXPECTED_CELLS=2000
-KIT="3prime:v3"
-CHEMISTRY="10x3v3"
+export PATH="$HOME/.local/bin:$PATH"
 
-FASTQ=path/to/ONT/test.fastq
-FILTERED=path/to/ONT/test_filtered.fastq.gz
-HTML=path/to/ONT/test_filtered_report.html
-JSON=path/to/ONT/test_filtered_report.json
-GENOME=path/to/genome.fa
-REF_GTF=path/to/genes.gtf
-REF_DIR=path/to/ref_genome_dir
-BARCODES=path/to/barcodes.txt
-REPEATMASKER=path/to/repeatmasker.out
-TE_GTF=path/to/TE_annotation.gtf
-FLAMES_SIF=path/to/flames.sif
-MINITE=path/to/miniTEQuant
-BAMBU_DIR=path/to/bambu-pipe
-OUT=path/to/ONT/Bambu-pipe
-ANNOT="$REF_GTF"
+# Discard reads with mean quality below 20 or length below 100 bp
+conda activate fastplong
+mkdir -p results/ONT/Bambu-pipe
+fastplong \
+    -i test/01-test-data/ONT/test.fastq \
+    -o results/ONT/Bambu-pipe/test_filtered.fastq.gz \
+    -h results/ONT/Bambu-pipe/test_filtered_report.html \
+    -j results/ONT/Bambu-pipe/test_filtered_report.json \
+    -m 20 \
+    -l 100 \
+    -w "$THREADS" \
+    -A
 
-run_fastplong() {
-  activate fastplong
-  fastplong -i "$FASTQ" -o "$FILTERED" -h "$HTML" -j "$JSON" -m 20 -l 100 -w "$THREADS" -A
-}
-
-run_wf() {
-  mkdir -p "$OUT/wf_output" "$OUT/wf_work"
-  nextflow run epi2me-labs/wf-single-cell -r v3.3.4 \
+# Assign ONT cell barcodes and UMIs, then align reads
+export NXF_VER=26.04.4
+mkdir -p results/ONT/Bambu-pipe/wf_output results/ONT/Bambu-pipe/wf_work
+nextflow run epi2me-labs/wf-single-cell -r v3.3.4 \
     -profile singularity \
-    --fastq "$FILTERED" \
+    --fastq results/ONT/Bambu-pipe/test_filtered.fastq.gz \
     --sample test \
-    --expected_cells "$EXPECTED_CELLS" \
-    --kit "$KIT" \
-    --ref_genome_dir "$REF_DIR" \
-    --out_dir "$OUT/wf_output" \
+    --expected_cells 2000 \
+    --kit '3prime:v3' \
+    --ref_genome_dir test/02-reference \
+    --out_dir results/ONT/Bambu-pipe/wf_output \
     --threads "$THREADS" \
-    -work-dir "$OUT/wf_work" \
+    -work-dir results/ONT/Bambu-pipe/wf_work \
     -resume
-  local src="$OUT/wf_output/test/test.tagged.bam"
-  [[ -f "$src" ]]
-  activate lraa
-  local header
-  header=$(samtools view -H "$src" | awk '$1=="@HD"{print; exit}')
-  if [[ "$header" == *SO:coordinate* ]]; then
-    cp -a "$src" "$OUT/tagged.bam"
-    if [[ -f "${src}.bai" ]]; then
-      cp -a "${src}.bai" "$OUT/tagged.bam.bai"
-    else
-      samtools index "$OUT/tagged.bam"
-    fi
-  else
-    samtools sort -@ "$THREADS" -o "$OUT/tagged.bam" "$src"
-    samtools index "$OUT/tagged.bam"
-  fi
-}
 
-run_bambu() {
-  cat > "$OUT/samplesheet.csv" <<EOF
+# Coordinate-sort and index the tagged BAM
+conda activate lraa
+samtools sort -@ "$THREADS" \
+    -o results/ONT/Bambu-pipe/tagged.bam \
+    results/ONT/Bambu-pipe/wf_output/test/test.tagged.bam
+samtools index results/ONT/Bambu-pipe/tagged.bam
+
+# Discover isoforms with Bambu-pipe
+cat > results/ONT/Bambu-pipe/samplesheet.csv <<'EOF'
 sample,path,chemistry,technology
-test,${FILTERED},${CHEMISTRY},ONT
+test,results/ONT/Bambu-pipe/test_filtered.fastq.gz,10x3v3,ONT
 EOF
-  nextflow run "$BAMBU_DIR/main.nf" \
-    --input "$OUT/samplesheet.csv" \
-    --genome "$GENOME" \
-    --annotation "$REF_GTF" \
-    --output_dir "$OUT/bambu_output" \
-    --chemistry "$CHEMISTRY" \
+export NXF_VER=26.04.4
+nextflow run bambu-pipe/main.nf \
+    --input results/ONT/Bambu-pipe/samplesheet.csv \
+    --genome test/02-reference/fasta/genome.fa \
+    --annotation test/02-reference/genes/genes.gtf \
+    --output_dir results/ONT/Bambu-pipe/bambu_output \
+    --chemistry 10x3v3 \
     --technology ONT \
     --qscore_filtering false \
     --quantification_mode no_quant \
     -profile singularity,local \
-    -work-dir "$OUT/bambu_work" \
+    -work-dir results/ONT/Bambu-pipe/bambu_work \
     -resume
-  cp "$OUT/bambu_output/extended_annotations.gtf" "$OUT/extended_annotation.gtf"
-  ANNOT="$OUT/extended_annotation.gtf"
-}
+cp results/ONT/Bambu-pipe/bambu_output/extended_annotations.gtf results/ONT/Bambu-pipe/extended_annotation.gtf
 
-run_flames() {
-  local outdir="$1" annot="$2"
-  mkdir -p "$outdir"
-  cat > "$outdir/run_flames.R" <<EOF
+# Quantify transcripts with FLAMESv2
+mkdir -p results/ONT/Bambu-pipe/flames_output
+cat > results/ONT/Bambu-pipe/flames_output/run_flames.R <<'EOF'
 options(bspm.sudo = TRUE)
 basilisk::setBasiliskFork(FALSE)
 suppressPackageStartupMessages(library(FLAMES))
-outdir   <- "${outdir}"
-fastq    <- "${FILTERED}"
-annot    <- "${annot}"
-genome   <- "${GENOME}"
-barcodes <- "${BARCODES}"
-threads  <- ${THREADS}
+outdir   <- "results/ONT/Bambu-pipe/flames_output"
+fastq    <- "results/ONT/Bambu-pipe/test_filtered.fastq.gz"
+annot    <- "results/ONT/Bambu-pipe/extended_annotation.gtf"
+genome   <- "test/02-reference/fasta/genome.fa"
+barcodes <- "test/01-test-data/barcodes/3M-february-2018.txt"
+threads  <- 8L
 dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
 cfg <- create_config(
   outdir,
@@ -1143,171 +834,68 @@ pipeline <- SingleCellPipeline(
 pipeline <- run_FLAMES(pipeline)
 saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
 EOF
-  singularity exec -e --bind path/to:path/to "$FLAMES_SIF" Rscript "$outdir/run_flames.R"
-}
+singularity exec -e --bind "$PWD:$PWD" flames.sif Rscript results/ONT/Bambu-pipe/flames_output/run_flames.R
 
-convert_matrix() {
-  activate miniTEQuant
-  python - "$1" "$2" <<'PY'
-import sys
-from pathlib import Path
-from scipy import io, sparse
-src, dst = Path(sys.argv[1]), Path(sys.argv[2])
-dst.mkdir(parents=True, exist_ok=True)
-prefix = next(src.glob("*.count.mtx")).name[: -len(".count.mtx")]
-barcodes = [x for x in (src / f"{prefix}.barcodes.txt").read_text().splitlines() if x]
-features = [ln.split("\t", 1)[0] for ln in (src / f"{prefix}.features.txt").read_text().splitlines() if ln]
-matrix = io.mmread(src / f"{prefix}.count.mtx").tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(f"Unexpected matrix shape {matrix.shape}")
-(dst / "barcodes.tsv").write_text("\n".join(barcodes) + "\n")
-(dst / "features.tsv").write_text("\n".join(features) + "\n")
-io.mmwrite(dst / "matrix.mtx", sparse.coo_matrix(matrix))
-PY
-}
+# Rename the Oarfish files to a gzip-compressed 10x matrix
+mkdir -p results/ONT/Bambu-pipe/filtered_feature_bc_matrix
+cp results/ONT/Bambu-pipe/flames_output/oarfish.barcodes.txt results/ONT/Bambu-pipe/filtered_feature_bc_matrix/barcodes.tsv
+cp results/ONT/Bambu-pipe/flames_output/oarfish.features.txt results/ONT/Bambu-pipe/filtered_feature_bc_matrix/features.tsv
+cp results/ONT/Bambu-pipe/flames_output/oarfish.count.mtx results/ONT/Bambu-pipe/filtered_feature_bc_matrix/matrix.mtx
+gzip -c results/ONT/Bambu-pipe/filtered_feature_bc_matrix/barcodes.tsv > results/ONT/Bambu-pipe/filtered_feature_bc_matrix/barcodes.tsv.gz
+gzip -c results/ONT/Bambu-pipe/filtered_feature_bc_matrix/features.tsv > results/ONT/Bambu-pipe/filtered_feature_bc_matrix/features.tsv.gz
+gzip -c results/ONT/Bambu-pipe/filtered_feature_bc_matrix/matrix.mtx > results/ONT/Bambu-pipe/filtered_feature_bc_matrix/matrix.mtx.gz
 
-run_te() {
-  activate miniTEQuant
-  if [[ ! -s "$TE_GTF" ]]; then
-    python "$MINITE/isoform_quantification/TE_analyse/create_simple_TE_gtf.py" \
-      -i "$REPEATMASKER" -o "$TE_GTF"
-  fi
-  python "$MINITE/isoform_quantification/main.py" cal_TE \
-    -gtf "$ANNOT" -te_gtf "$TE_GTF" \
-    --custom_sc_quant "$OUT/filtered_feature_bc_matrix" \
-    -t "$THREADS" -o "$OUT/te_quant"
-}
+# Quantify TE loci and subfamilies
+conda activate miniTEQuant
+python miniTEQuant/isoform_quantification/main.py cal_TE \
+    -gtf results/ONT/Bambu-pipe/extended_annotation.gtf \
+    -te_gtf test/02-reference/TE-annotation/hg38_filtered_chromosomes.gtf \
+    --custom_sc_quant results/ONT/Bambu-pipe/filtered_feature_bc_matrix \
+    -t "$THREADS" \
+    -o results/ONT/Bambu-pipe/te_quant
 
-classify() {
-  activate miniTEQuant
-  QUANT_DIR="$OUT/filtered_feature_bc_matrix" \
-  CLASS_FILE="$OUT/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv" \
-  OUT_FILE="$OUT/transcript_class_counts.tsv" \
-  MAP_FILE="$OUT/transcript_class_map.tsv" \
-  UNMATCHED_FILE="$OUT/unmatched_transcripts.txt" \
-  python - <<'PY'
-import gzip, os, re
-from pathlib import Path
-import numpy as np, pandas as pd
-from scipy import io
-quant_dir = Path(os.environ["QUANT_DIR"])
-def open_text(path):
-    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
-def locate(stem):
-    for name in (stem, stem + ".gz"):
-        candidate = quant_dir / name
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(quant_dir / stem)
-def strip_version(identifier):
-    return re.sub(r"\.\d+$", "", identifier)
-barcodes = [ln.strip() for ln in open_text(locate("barcodes.tsv")) if ln.strip()]
-features = []
-with open_text(locate("features.tsv")) as handle:
-    for line in handle:
-        fields = line.rstrip("\n").split("\t")
-        if fields and fields[0]:
-            features.append(fields[0])
-matrix = io.mmread(locate("matrix.mtx")).tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(f"Matrix shape {matrix.shape} does not match {len(features)} transcripts by {len(barcodes)} cells")
-table = pd.read_csv(os.environ["CLASS_FILE"], sep="\t", header=None, dtype=str, keep_default_na=False)
-if table.shape[1] < 11:
-    raise SystemExit("cell_transcript_classification_counts.tsv has fewer than 11 columns")
-if table.iloc[0, 10].strip().lower() in {"classification", "transcript_classification", "class"}:
-    table = table.iloc[1:].reset_index(drop=True)
-class_by_id, class_by_stripped = {}, {}
-for transcript_id, transcript_class in zip(table.iloc[:, 0], table.iloc[:, 10]):
-    transcript_id, transcript_class = transcript_id.strip(), transcript_class.strip()
-    if transcript_id and transcript_class:
-        class_by_id[transcript_id] = transcript_class
-        class_by_stripped.setdefault(strip_version(transcript_id), transcript_class)
-labels = []
-for transcript_id in features:
-    label = class_by_id.get(transcript_id)
-    if label is None:
-        label = class_by_stripped.get(strip_version(transcript_id))
-    labels.append(label)
-assignment = pd.DataFrame({"transcript_id": features, "class": labels})
-assignment.to_csv(os.environ["MAP_FILE"], sep="\t", index=False)
-assignment.loc[assignment["class"].isna(), "transcript_id"].to_csv(os.environ["UNMATCHED_FILE"], index=False, header=False)
-preferred = ["Gene-alone", "TE-alone", "TE-Gene"]
-present = [label for label in preferred if (assignment["class"] == label).any()]
-present += sorted(set(assignment["class"].dropna()) - set(preferred))
-if not present:
-    raise SystemExit("No quantification-matrix transcript matched a class")
-rows = []
-for label in present:
-    positions = [i for i, value in enumerate(labels) if value == label]
-    rows.append(np.asarray(matrix[positions].sum(axis=0)).ravel().astype(int))
-counts = pd.DataFrame(rows, index=present, columns=barcodes)
-counts.index.name = "class"
-counts.to_csv(os.environ["OUT_FILE"], sep="\t")
-print(f"Matched transcripts: {assignment['class'].notna().sum()} / {len(features)}")
-PY
-}
-
-mkdir -p "$OUT"
-run_fastplong
-run_wf
-run_bambu
-run_flames "$OUT/flames_output" "$ANNOT"
-convert_matrix "$OUT/flames_output" "$OUT/filtered_feature_bc_matrix"
-run_te
-classify
-echo "ONT Bambu-pipe results: $OUT/extended_annotation.gtf $OUT/filtered_feature_bc_matrix $OUT/te_quant/Custom_SC_TE_output $OUT/transcript_class_counts.tsv"
+# Split transcripts into Gene-alone, TE-alone, and TE-Gene
+python split_by_transcript_classification.py \
+    --barcodes results/ONT/Bambu-pipe/filtered_feature_bc_matrix/barcodes.tsv.gz \
+    --features results/ONT/Bambu-pipe/filtered_feature_bc_matrix/features.tsv.gz \
+    --matrix results/ONT/Bambu-pipe/filtered_feature_bc_matrix/matrix.mtx.gz \
+    --quant results/ONT/Bambu-pipe/te_quant/transcript_quantification_with_TE.tsv
 ```
 
 ### PacBio, reference annotation
 
-FLAMESv2 both assigns barcodes and quantifies against `path/to/genes.gtf`. The genome alignment from this run is `path/to/PacBio/no_discovery/flames_output/align2genome.bam`.
+FLAMESv2 assigns barcodes and quantifies `test/02-reference/genes/genes.gtf`. This run also writes `results/PacBio/reference/flames_output/align2genome.bam`.
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-source "$(conda info --base)/etc/profile.d/conda.sh"
-export PATH="$HOME/.local/bin:${PATH}"
-
-activate() { set +u; conda activate "$1"; set -u; }
-
+# Run these commands from the repository root
 THREADS=8
+export PATH="$HOME/.local/bin:$PATH"
 
-FASTQ=path/to/PacBio/test.fastq
-FILTERED=path/to/PacBio/test_filtered.fastq.gz
-HTML=path/to/PacBio/test_filtered_report.html
-JSON=path/to/PacBio/test_filtered_report.json
-GENOME=path/to/genome.fa
-REF_GTF=path/to/genes.gtf
-BARCODES=path/to/barcodes.txt
-REPEATMASKER=path/to/repeatmasker.out
-TE_GTF=path/to/TE_annotation.gtf
-FLAMES_SIF=path/to/flames.sif
-MINITE=path/to/miniTEQuant
-OUT=path/to/PacBio/no_discovery
-ANNOT="$REF_GTF"
+# Discard reads with mean quality below 20 or length below 100 bp
+conda activate fastplong
+mkdir -p results/PacBio/reference
+fastplong \
+    -i test/01-test-data/PacBio/test.fastq \
+    -o results/PacBio/reference/test_filtered.fastq.gz \
+    -h results/PacBio/reference/test_filtered_report.html \
+    -j results/PacBio/reference/test_filtered_report.json \
+    -m 20 \
+    -l 100 \
+    -w "$THREADS" \
+    -A
 
-run_fastplong() {
-  activate fastplong
-  fastplong -i "$FASTQ" -o "$FILTERED" -h "$HTML" -j "$JSON" -m 20 -l 100 -w "$THREADS" -A
-}
-
-run_flames() {
-  local outdir="$1" annot="$2"
-  mkdir -p "$outdir"
-  cat > "$outdir/run_flames.R" <<EOF
+# Quantify transcripts with FLAMESv2
+mkdir -p results/PacBio/reference/flames_output
+cat > results/PacBio/reference/flames_output/run_flames.R <<'EOF'
 options(bspm.sudo = TRUE)
 basilisk::setBasiliskFork(FALSE)
 suppressPackageStartupMessages(library(FLAMES))
-outdir   <- "${outdir}"
-fastq    <- "${FILTERED}"
-annot    <- "${annot}"
-genome   <- "${GENOME}"
-barcodes <- "${BARCODES}"
-threads  <- ${THREADS}
+outdir   <- "results/PacBio/reference/flames_output"
+fastq    <- "results/PacBio/reference/test_filtered.fastq.gz"
+annot    <- "test/02-reference/genes/genes.gtf"
+genome   <- "test/02-reference/fasta/genome.fa"
+barcodes <- "test/01-test-data/barcodes/3M-february-2018.txt"
+threads  <- 8L
 dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
 cfg <- create_config(
   outdir,
@@ -1324,169 +912,68 @@ pipeline <- SingleCellPipeline(
 pipeline <- run_FLAMES(pipeline)
 saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
 EOF
-  singularity exec -e --bind path/to:path/to "$FLAMES_SIF" Rscript "$outdir/run_flames.R"
-}
+singularity exec -e --bind "$PWD:$PWD" flames.sif Rscript results/PacBio/reference/flames_output/run_flames.R
 
-convert_matrix() {
-  activate miniTEQuant
-  python - "$1" "$2" <<'PY'
-import sys
-from pathlib import Path
-from scipy import io, sparse
-src, dst = Path(sys.argv[1]), Path(sys.argv[2])
-dst.mkdir(parents=True, exist_ok=True)
-prefix = next(src.glob("*.count.mtx")).name[: -len(".count.mtx")]
-barcodes = [x for x in (src / f"{prefix}.barcodes.txt").read_text().splitlines() if x]
-features = [ln.split("\t", 1)[0] for ln in (src / f"{prefix}.features.txt").read_text().splitlines() if ln]
-matrix = io.mmread(src / f"{prefix}.count.mtx").tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(f"Unexpected matrix shape {matrix.shape}")
-(dst / "barcodes.tsv").write_text("\n".join(barcodes) + "\n")
-(dst / "features.tsv").write_text("\n".join(features) + "\n")
-io.mmwrite(dst / "matrix.mtx", sparse.coo_matrix(matrix))
-PY
-}
+# Rename the Oarfish files to a gzip-compressed 10x matrix
+mkdir -p results/PacBio/reference/filtered_feature_bc_matrix
+cp results/PacBio/reference/flames_output/oarfish.barcodes.txt results/PacBio/reference/filtered_feature_bc_matrix/barcodes.tsv
+cp results/PacBio/reference/flames_output/oarfish.features.txt results/PacBio/reference/filtered_feature_bc_matrix/features.tsv
+cp results/PacBio/reference/flames_output/oarfish.count.mtx results/PacBio/reference/filtered_feature_bc_matrix/matrix.mtx
+gzip -c results/PacBio/reference/filtered_feature_bc_matrix/barcodes.tsv > results/PacBio/reference/filtered_feature_bc_matrix/barcodes.tsv.gz
+gzip -c results/PacBio/reference/filtered_feature_bc_matrix/features.tsv > results/PacBio/reference/filtered_feature_bc_matrix/features.tsv.gz
+gzip -c results/PacBio/reference/filtered_feature_bc_matrix/matrix.mtx > results/PacBio/reference/filtered_feature_bc_matrix/matrix.mtx.gz
 
-run_te() {
-  activate miniTEQuant
-  if [[ ! -s "$TE_GTF" ]]; then
-    python "$MINITE/isoform_quantification/TE_analyse/create_simple_TE_gtf.py" \
-      -i "$REPEATMASKER" -o "$TE_GTF"
-  fi
-  python "$MINITE/isoform_quantification/main.py" cal_TE \
-    -gtf "$ANNOT" -te_gtf "$TE_GTF" \
-    --custom_sc_quant "$OUT/filtered_feature_bc_matrix" \
-    -t "$THREADS" -o "$OUT/te_quant"
-}
+# Quantify TE loci and subfamilies
+conda activate miniTEQuant
+python miniTEQuant/isoform_quantification/main.py cal_TE \
+    -gtf test/02-reference/genes/genes.gtf \
+    -te_gtf test/02-reference/TE-annotation/hg38_filtered_chromosomes.gtf \
+    --custom_sc_quant results/PacBio/reference/filtered_feature_bc_matrix \
+    -t "$THREADS" \
+    -o results/PacBio/reference/te_quant
 
-classify() {
-  activate miniTEQuant
-  QUANT_DIR="$OUT/filtered_feature_bc_matrix" \
-  CLASS_FILE="$OUT/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv" \
-  OUT_FILE="$OUT/transcript_class_counts.tsv" \
-  MAP_FILE="$OUT/transcript_class_map.tsv" \
-  UNMATCHED_FILE="$OUT/unmatched_transcripts.txt" \
-  python - <<'PY'
-import gzip, os, re
-from pathlib import Path
-import numpy as np, pandas as pd
-from scipy import io
-quant_dir = Path(os.environ["QUANT_DIR"])
-def open_text(path):
-    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
-def locate(stem):
-    for name in (stem, stem + ".gz"):
-        candidate = quant_dir / name
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(quant_dir / stem)
-def strip_version(identifier):
-    return re.sub(r"\.\d+$", "", identifier)
-barcodes = [ln.strip() for ln in open_text(locate("barcodes.tsv")) if ln.strip()]
-features = []
-with open_text(locate("features.tsv")) as handle:
-    for line in handle:
-        fields = line.rstrip("\n").split("\t")
-        if fields and fields[0]:
-            features.append(fields[0])
-matrix = io.mmread(locate("matrix.mtx")).tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(f"Matrix shape {matrix.shape} does not match {len(features)} transcripts by {len(barcodes)} cells")
-table = pd.read_csv(os.environ["CLASS_FILE"], sep="\t", header=None, dtype=str, keep_default_na=False)
-if table.shape[1] < 11:
-    raise SystemExit("cell_transcript_classification_counts.tsv has fewer than 11 columns")
-if table.iloc[0, 10].strip().lower() in {"classification", "transcript_classification", "class"}:
-    table = table.iloc[1:].reset_index(drop=True)
-class_by_id, class_by_stripped = {}, {}
-for transcript_id, transcript_class in zip(table.iloc[:, 0], table.iloc[:, 10]):
-    transcript_id, transcript_class = transcript_id.strip(), transcript_class.strip()
-    if transcript_id and transcript_class:
-        class_by_id[transcript_id] = transcript_class
-        class_by_stripped.setdefault(strip_version(transcript_id), transcript_class)
-labels = []
-for transcript_id in features:
-    label = class_by_id.get(transcript_id)
-    if label is None:
-        label = class_by_stripped.get(strip_version(transcript_id))
-    labels.append(label)
-assignment = pd.DataFrame({"transcript_id": features, "class": labels})
-assignment.to_csv(os.environ["MAP_FILE"], sep="\t", index=False)
-assignment.loc[assignment["class"].isna(), "transcript_id"].to_csv(os.environ["UNMATCHED_FILE"], index=False, header=False)
-preferred = ["Gene-alone", "TE-alone", "TE-Gene"]
-present = [label for label in preferred if (assignment["class"] == label).any()]
-present += sorted(set(assignment["class"].dropna()) - set(preferred))
-if not present:
-    raise SystemExit("No quantification-matrix transcript matched a class")
-rows = []
-for label in present:
-    positions = [i for i, value in enumerate(labels) if value == label]
-    rows.append(np.asarray(matrix[positions].sum(axis=0)).ravel().astype(int))
-counts = pd.DataFrame(rows, index=present, columns=barcodes)
-counts.index.name = "class"
-counts.to_csv(os.environ["OUT_FILE"], sep="\t")
-print(f"Matched transcripts: {assignment['class'].notna().sum()} / {len(features)}")
-PY
-}
-
-mkdir -p "$OUT"
-run_fastplong
-run_flames "$OUT/flames_output" "$ANNOT"
-convert_matrix "$OUT/flames_output" "$OUT/filtered_feature_bc_matrix"
-run_te
-classify
-echo "PacBio reference-annotation results: $OUT/flames_output/align2genome.bam $OUT/filtered_feature_bc_matrix $OUT/te_quant/Custom_SC_TE_output $OUT/transcript_class_counts.tsv"
+# Split transcripts into Gene-alone, TE-alone, and TE-Gene
+python split_by_transcript_classification.py \
+    --barcodes results/PacBio/reference/filtered_feature_bc_matrix/barcodes.tsv.gz \
+    --features results/PacBio/reference/filtered_feature_bc_matrix/features.tsv.gz \
+    --matrix results/PacBio/reference/filtered_feature_bc_matrix/matrix.mtx.gz \
+    --quant results/PacBio/reference/te_quant/transcript_quantification_with_TE.tsv
 ```
 
 ### PacBio, LRAA discovery
 
-The first FLAMESv2 run writes `path/to/PacBio/LRAA/flames_align/align2genome.bam`. LRAA is called with `--HiFi` and writes `path/to/PacBio/LRAA/extended_annotation.gtf`. The second FLAMESv2 run quantifies that annotation.
+The first FLAMESv2 run writes the genome alignment. LRAA is called with `--HiFi` and the second FLAMESv2 run quantifies `results/PacBio/LRAA/extended_annotation.gtf`.
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-source "$(conda info --base)/etc/profile.d/conda.sh"
-export PATH="$HOME/.local/bin:path/to/LongReadAlignmentAssembler:${PATH}"
-
-activate() { set +u; conda activate "$1"; set -u; }
-
+# Run these commands from the repository root
 THREADS=8
+export PATH="$HOME/.local/bin:$PATH"
 
-FASTQ=path/to/PacBio/test.fastq
-FILTERED=path/to/PacBio/test_filtered.fastq.gz
-HTML=path/to/PacBio/test_filtered_report.html
-JSON=path/to/PacBio/test_filtered_report.json
-GENOME=path/to/genome.fa
-REF_GTF=path/to/genes.gtf
-BARCODES=path/to/barcodes.txt
-REPEATMASKER=path/to/repeatmasker.out
-TE_GTF=path/to/TE_annotation.gtf
-FLAMES_SIF=path/to/flames.sif
-MINITE=path/to/miniTEQuant
-OUT=path/to/PacBio/LRAA
-ANNOT="$REF_GTF"
+# Discard reads with mean quality below 20 or length below 100 bp
+conda activate fastplong
+mkdir -p results/PacBio/LRAA
+fastplong \
+    -i test/01-test-data/PacBio/test.fastq \
+    -o results/PacBio/LRAA/test_filtered.fastq.gz \
+    -h results/PacBio/LRAA/test_filtered_report.html \
+    -j results/PacBio/LRAA/test_filtered_report.json \
+    -m 20 \
+    -l 100 \
+    -w "$THREADS" \
+    -A
 
-run_fastplong() {
-  activate fastplong
-  fastplong -i "$FASTQ" -o "$FILTERED" -h "$HTML" -j "$JSON" -m 20 -l 100 -w "$THREADS" -A
-}
-
-run_flames() {
-  local outdir="$1" annot="$2"
-  mkdir -p "$outdir"
-  cat > "$outdir/run_flames.R" <<EOF
+# Quantify transcripts with FLAMESv2
+mkdir -p results/PacBio/LRAA/flames_align
+cat > results/PacBio/LRAA/flames_align/run_flames.R <<'EOF'
 options(bspm.sudo = TRUE)
 basilisk::setBasiliskFork(FALSE)
 suppressPackageStartupMessages(library(FLAMES))
-outdir   <- "${outdir}"
-fastq    <- "${FILTERED}"
-annot    <- "${annot}"
-genome   <- "${GENOME}"
-barcodes <- "${BARCODES}"
-threads  <- ${THREADS}
+outdir   <- "results/PacBio/LRAA/flames_align"
+fastq    <- "results/PacBio/LRAA/test_filtered.fastq.gz"
+annot    <- "test/02-reference/genes/genes.gtf"
+genome   <- "test/02-reference/fasta/genome.fa"
+barcodes <- "test/01-test-data/barcodes/3M-february-2018.txt"
+threads  <- 8L
 dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
 cfg <- create_config(
   outdir,
@@ -1503,211 +990,40 @@ pipeline <- SingleCellPipeline(
 pipeline <- run_FLAMES(pipeline)
 saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
 EOF
-  singularity exec -e --bind path/to:path/to "$FLAMES_SIF" Rscript "$outdir/run_flames.R"
-}
+singularity exec -e --bind "$PWD:$PWD" flames.sif Rscript results/PacBio/LRAA/flames_align/run_flames.R
 
-prepare_align2genome() {
-  local src="$OUT/flames_align/align2genome.bam"
-  [[ -f "$src" ]]
-  activate lraa
-  local header
-  header=$(samtools view -H "$src" | awk '$1=="@HD"{print; exit}')
-  if [[ "$header" == *SO:coordinate* ]]; then
-    cp -a "$src" "$OUT/align2genome.bam"
-    if [[ -f "${src}.bai" ]]; then
-      cp -a "${src}.bai" "$OUT/align2genome.bam.bai"
-    else
-      samtools index "$OUT/align2genome.bam"
-    fi
-  else
-    samtools sort -@ "$THREADS" -o "$OUT/align2genome.bam" "$src"
-    samtools index "$OUT/align2genome.bam"
-  fi
-}
+# Coordinate-sort and index the FLAMESv2 genome alignment
+conda activate lraa
+samtools sort -@ "$THREADS" -o results/PacBio/LRAA/align2genome.bam results/PacBio/LRAA/flames_align/align2genome.bam
+samtools index results/PacBio/LRAA/align2genome.bam
 
-run_lraa() {
-  activate lraa
-  samtools index "$OUT/align2genome.bam"
-  LRAA \
-    --genome "$GENOME" \
-    --bam "$OUT/align2genome.bam" \
-    --gtf "$REF_GTF" \
-    --output_prefix "$OUT/extended_annotation" \
+# Discover isoforms with LRAA
+conda activate lraa
+samtools index results/PacBio/LRAA/align2genome.bam
+LRAA \
+    --genome test/02-reference/fasta/genome.fa \
+    --bam results/PacBio/LRAA/align2genome.bam \
+    --gtf test/02-reference/genes/genes.gtf \
+    --output_prefix results/PacBio/LRAA/extended_annotation \
     --cell_barcode_tag CB \
     --read_umi_tag UB \
     --num_parallel_contigs 4 \
     --num_threads_per_worker "$THREADS" \
     --oversimplify chrM \
     --HiFi
-  ANNOT="$OUT/extended_annotation.gtf"
-  [[ -s "$ANNOT" ]]
-}
 
-convert_matrix() {
-  activate miniTEQuant
-  python - "$1" "$2" <<'PY'
-import sys
-from pathlib import Path
-from scipy import io, sparse
-src, dst = Path(sys.argv[1]), Path(sys.argv[2])
-dst.mkdir(parents=True, exist_ok=True)
-prefix = next(src.glob("*.count.mtx")).name[: -len(".count.mtx")]
-barcodes = [x for x in (src / f"{prefix}.barcodes.txt").read_text().splitlines() if x]
-features = [ln.split("\t", 1)[0] for ln in (src / f"{prefix}.features.txt").read_text().splitlines() if ln]
-matrix = io.mmread(src / f"{prefix}.count.mtx").tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(f"Unexpected matrix shape {matrix.shape}")
-(dst / "barcodes.tsv").write_text("\n".join(barcodes) + "\n")
-(dst / "features.tsv").write_text("\n".join(features) + "\n")
-io.mmwrite(dst / "matrix.mtx", sparse.coo_matrix(matrix))
-PY
-}
-
-run_te() {
-  activate miniTEQuant
-  if [[ ! -s "$TE_GTF" ]]; then
-    python "$MINITE/isoform_quantification/TE_analyse/create_simple_TE_gtf.py" \
-      -i "$REPEATMASKER" -o "$TE_GTF"
-  fi
-  python "$MINITE/isoform_quantification/main.py" cal_TE \
-    -gtf "$ANNOT" -te_gtf "$TE_GTF" \
-    --custom_sc_quant "$OUT/filtered_feature_bc_matrix" \
-    -t "$THREADS" -o "$OUT/te_quant"
-}
-
-classify() {
-  activate miniTEQuant
-  QUANT_DIR="$OUT/filtered_feature_bc_matrix" \
-  CLASS_FILE="$OUT/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv" \
-  OUT_FILE="$OUT/transcript_class_counts.tsv" \
-  MAP_FILE="$OUT/transcript_class_map.tsv" \
-  UNMATCHED_FILE="$OUT/unmatched_transcripts.txt" \
-  python - <<'PY'
-import gzip, os, re
-from pathlib import Path
-import numpy as np, pandas as pd
-from scipy import io
-quant_dir = Path(os.environ["QUANT_DIR"])
-def open_text(path):
-    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
-def locate(stem):
-    for name in (stem, stem + ".gz"):
-        candidate = quant_dir / name
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(quant_dir / stem)
-def strip_version(identifier):
-    return re.sub(r"\.\d+$", "", identifier)
-barcodes = [ln.strip() for ln in open_text(locate("barcodes.tsv")) if ln.strip()]
-features = []
-with open_text(locate("features.tsv")) as handle:
-    for line in handle:
-        fields = line.rstrip("\n").split("\t")
-        if fields and fields[0]:
-            features.append(fields[0])
-matrix = io.mmread(locate("matrix.mtx")).tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(f"Matrix shape {matrix.shape} does not match {len(features)} transcripts by {len(barcodes)} cells")
-table = pd.read_csv(os.environ["CLASS_FILE"], sep="\t", header=None, dtype=str, keep_default_na=False)
-if table.shape[1] < 11:
-    raise SystemExit("cell_transcript_classification_counts.tsv has fewer than 11 columns")
-if table.iloc[0, 10].strip().lower() in {"classification", "transcript_classification", "class"}:
-    table = table.iloc[1:].reset_index(drop=True)
-class_by_id, class_by_stripped = {}, {}
-for transcript_id, transcript_class in zip(table.iloc[:, 0], table.iloc[:, 10]):
-    transcript_id, transcript_class = transcript_id.strip(), transcript_class.strip()
-    if transcript_id and transcript_class:
-        class_by_id[transcript_id] = transcript_class
-        class_by_stripped.setdefault(strip_version(transcript_id), transcript_class)
-labels = []
-for transcript_id in features:
-    label = class_by_id.get(transcript_id)
-    if label is None:
-        label = class_by_stripped.get(strip_version(transcript_id))
-    labels.append(label)
-assignment = pd.DataFrame({"transcript_id": features, "class": labels})
-assignment.to_csv(os.environ["MAP_FILE"], sep="\t", index=False)
-assignment.loc[assignment["class"].isna(), "transcript_id"].to_csv(os.environ["UNMATCHED_FILE"], index=False, header=False)
-preferred = ["Gene-alone", "TE-alone", "TE-Gene"]
-present = [label for label in preferred if (assignment["class"] == label).any()]
-present += sorted(set(assignment["class"].dropna()) - set(preferred))
-if not present:
-    raise SystemExit("No quantification-matrix transcript matched a class")
-rows = []
-for label in present:
-    positions = [i for i, value in enumerate(labels) if value == label]
-    rows.append(np.asarray(matrix[positions].sum(axis=0)).ravel().astype(int))
-counts = pd.DataFrame(rows, index=present, columns=barcodes)
-counts.index.name = "class"
-counts.to_csv(os.environ["OUT_FILE"], sep="\t")
-print(f"Matched transcripts: {assignment['class'].notna().sum()} / {len(features)}")
-PY
-}
-
-mkdir -p "$OUT"
-run_fastplong
-run_flames "$OUT/flames_align" "$REF_GTF"
-prepare_align2genome
-run_lraa
-run_flames "$OUT/flames_output" "$ANNOT"
-convert_matrix "$OUT/flames_output" "$OUT/filtered_feature_bc_matrix"
-run_te
-classify
-echo "PacBio LRAA results: $OUT/align2genome.bam $OUT/extended_annotation.gtf $OUT/filtered_feature_bc_matrix $OUT/te_quant/Custom_SC_TE_output $OUT/transcript_class_counts.tsv"
-```
-
-### PacBio, Bambu-pipe discovery
-
-FLAMESv2 first assigns barcodes and writes `path/to/PacBio/Bambu-pipe/flames_align/align2genome.bam`. Bambu-pipe then reads `path/to/PacBio/test_filtered.fastq.gz`. Its annotation is saved as `path/to/PacBio/Bambu-pipe/extended_annotation.gtf` and quantified by a second FLAMESv2 run.
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-source "$(conda info --base)/etc/profile.d/conda.sh"
-export PATH="$HOME/.local/bin:${PATH}"
-
-activate() { set +u; conda activate "$1"; set -u; }
-
-THREADS=8
-CHEMISTRY="10x3v3"
-
-FASTQ=path/to/PacBio/test.fastq
-FILTERED=path/to/PacBio/test_filtered.fastq.gz
-HTML=path/to/PacBio/test_filtered_report.html
-JSON=path/to/PacBio/test_filtered_report.json
-GENOME=path/to/genome.fa
-REF_GTF=path/to/genes.gtf
-BARCODES=path/to/barcodes.txt
-REPEATMASKER=path/to/repeatmasker.out
-TE_GTF=path/to/TE_annotation.gtf
-FLAMES_SIF=path/to/flames.sif
-MINITE=path/to/miniTEQuant
-BAMBU_DIR=path/to/bambu-pipe
-OUT=path/to/PacBio/Bambu-pipe
-ANNOT="$REF_GTF"
-
-run_fastplong() {
-  activate fastplong
-  fastplong -i "$FASTQ" -o "$FILTERED" -h "$HTML" -j "$JSON" -m 20 -l 100 -w "$THREADS" -A
-}
-
-run_flames() {
-  local outdir="$1" annot="$2"
-  mkdir -p "$outdir"
-  cat > "$outdir/run_flames.R" <<EOF
+# Quantify transcripts with FLAMESv2
+mkdir -p results/PacBio/LRAA/flames_output
+cat > results/PacBio/LRAA/flames_output/run_flames.R <<'EOF'
 options(bspm.sudo = TRUE)
 basilisk::setBasiliskFork(FALSE)
 suppressPackageStartupMessages(library(FLAMES))
-outdir   <- "${outdir}"
-fastq    <- "${FILTERED}"
-annot    <- "${annot}"
-genome   <- "${GENOME}"
-barcodes <- "${BARCODES}"
-threads  <- ${THREADS}
+outdir   <- "results/PacBio/LRAA/flames_output"
+fastq    <- "results/PacBio/LRAA/test_filtered.fastq.gz"
+annot    <- "results/PacBio/LRAA/extended_annotation.gtf"
+genome   <- "test/02-reference/fasta/genome.fa"
+barcodes <- "test/01-test-data/barcodes/3M-february-2018.txt"
+threads  <- 8L
 dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
 cfg <- create_config(
   outdir,
@@ -1724,144 +1040,160 @@ pipeline <- SingleCellPipeline(
 pipeline <- run_FLAMES(pipeline)
 saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
 EOF
-  singularity exec -e --bind path/to:path/to "$FLAMES_SIF" Rscript "$outdir/run_flames.R"
-}
+singularity exec -e --bind "$PWD:$PWD" flames.sif Rscript results/PacBio/LRAA/flames_output/run_flames.R
 
-run_bambu() {
-  cat > "$OUT/samplesheet.csv" <<EOF
-sample,path,chemistry,technology
-test,${FILTERED},${CHEMISTRY},PacBio
+# Rename the Oarfish files to a gzip-compressed 10x matrix
+mkdir -p results/PacBio/LRAA/filtered_feature_bc_matrix
+cp results/PacBio/LRAA/flames_output/oarfish.barcodes.txt results/PacBio/LRAA/filtered_feature_bc_matrix/barcodes.tsv
+cp results/PacBio/LRAA/flames_output/oarfish.features.txt results/PacBio/LRAA/filtered_feature_bc_matrix/features.tsv
+cp results/PacBio/LRAA/flames_output/oarfish.count.mtx results/PacBio/LRAA/filtered_feature_bc_matrix/matrix.mtx
+gzip -c results/PacBio/LRAA/filtered_feature_bc_matrix/barcodes.tsv > results/PacBio/LRAA/filtered_feature_bc_matrix/barcodes.tsv.gz
+gzip -c results/PacBio/LRAA/filtered_feature_bc_matrix/features.tsv > results/PacBio/LRAA/filtered_feature_bc_matrix/features.tsv.gz
+gzip -c results/PacBio/LRAA/filtered_feature_bc_matrix/matrix.mtx > results/PacBio/LRAA/filtered_feature_bc_matrix/matrix.mtx.gz
+
+# Quantify TE loci and subfamilies
+conda activate miniTEQuant
+python miniTEQuant/isoform_quantification/main.py cal_TE \
+    -gtf results/PacBio/LRAA/extended_annotation.gtf \
+    -te_gtf test/02-reference/TE-annotation/hg38_filtered_chromosomes.gtf \
+    --custom_sc_quant results/PacBio/LRAA/filtered_feature_bc_matrix \
+    -t "$THREADS" \
+    -o results/PacBio/LRAA/te_quant
+
+# Split transcripts into Gene-alone, TE-alone, and TE-Gene
+python split_by_transcript_classification.py \
+    --barcodes results/PacBio/LRAA/filtered_feature_bc_matrix/barcodes.tsv.gz \
+    --features results/PacBio/LRAA/filtered_feature_bc_matrix/features.tsv.gz \
+    --matrix results/PacBio/LRAA/filtered_feature_bc_matrix/matrix.mtx.gz \
+    --quant results/PacBio/LRAA/te_quant/transcript_quantification_with_TE.tsv
+```
+
+### PacBio, Bambu-pipe discovery
+
+The first FLAMESv2 run assigns barcodes and writes `results/PacBio/Bambu-pipe/flames_align/align2genome.bam`. Bambu-pipe then writes `results/PacBio/Bambu-pipe/extended_annotation.gtf`, which the second FLAMESv2 run quantifies.
+
+```bash
+# Run these commands from the repository root
+THREADS=8
+export PATH="$HOME/.local/bin:$PATH"
+
+# Discard reads with mean quality below 20 or length below 100 bp
+conda activate fastplong
+mkdir -p results/PacBio/Bambu-pipe
+fastplong \
+    -i test/01-test-data/PacBio/test.fastq \
+    -o results/PacBio/Bambu-pipe/test_filtered.fastq.gz \
+    -h results/PacBio/Bambu-pipe/test_filtered_report.html \
+    -j results/PacBio/Bambu-pipe/test_filtered_report.json \
+    -m 20 \
+    -l 100 \
+    -w "$THREADS" \
+    -A
+
+# Quantify transcripts with FLAMESv2
+mkdir -p results/PacBio/Bambu-pipe/flames_align
+cat > results/PacBio/Bambu-pipe/flames_align/run_flames.R <<'EOF'
+options(bspm.sudo = TRUE)
+basilisk::setBasiliskFork(FALSE)
+suppressPackageStartupMessages(library(FLAMES))
+outdir   <- "results/PacBio/Bambu-pipe/flames_align"
+fastq    <- "results/PacBio/Bambu-pipe/test_filtered.fastq.gz"
+annot    <- "test/02-reference/genes/genes.gtf"
+genome   <- "test/02-reference/fasta/genome.fa"
+barcodes <- "test/01-test-data/barcodes/3M-february-2018.txt"
+threads  <- 8L
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+cfg <- create_config(
+  outdir,
+  pipeline_parameters.demultiplexer = "flexiplex",
+  do_isoform_identification = FALSE,
+  bambu_isoform_identification = FALSE,
+  oarfish_quantification = TRUE,
+  threads = threads
+)
+pipeline <- SingleCellPipeline(
+  config_file = cfg, outdir = outdir, fastq = c(fastq),
+  annotation = annot, genome_fa = genome, barcodes_file = barcodes
+)
+pipeline <- run_FLAMES(pipeline)
+saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
 EOF
-  nextflow run "$BAMBU_DIR/main.nf" \
-    --input "$OUT/samplesheet.csv" \
-    --genome "$GENOME" \
-    --annotation "$REF_GTF" \
-    --output_dir "$OUT/bambu_output" \
-    --chemistry "$CHEMISTRY" \
+singularity exec -e --bind "$PWD:$PWD" flames.sif Rscript results/PacBio/Bambu-pipe/flames_align/run_flames.R
+
+# Discover isoforms with Bambu-pipe
+cat > results/PacBio/Bambu-pipe/samplesheet.csv <<'EOF'
+sample,path,chemistry,technology
+test,results/PacBio/Bambu-pipe/test_filtered.fastq.gz,10x3v3,PacBio
+EOF
+export NXF_VER=26.04.4
+nextflow run bambu-pipe/main.nf \
+    --input results/PacBio/Bambu-pipe/samplesheet.csv \
+    --genome test/02-reference/fasta/genome.fa \
+    --annotation test/02-reference/genes/genes.gtf \
+    --output_dir results/PacBio/Bambu-pipe/bambu_output \
+    --chemistry 10x3v3 \
     --technology PacBio \
     --qscore_filtering false \
     --quantification_mode no_quant \
     -profile singularity,local \
-    -work-dir "$OUT/bambu_work" \
+    -work-dir results/PacBio/Bambu-pipe/bambu_work \
     -resume
-  cp "$OUT/bambu_output/extended_annotations.gtf" "$OUT/extended_annotation.gtf"
-  ANNOT="$OUT/extended_annotation.gtf"
-}
+cp results/PacBio/Bambu-pipe/bambu_output/extended_annotations.gtf results/PacBio/Bambu-pipe/extended_annotation.gtf
 
-convert_matrix() {
-  activate miniTEQuant
-  python - "$1" "$2" <<'PY'
-import sys
-from pathlib import Path
-from scipy import io, sparse
-src, dst = Path(sys.argv[1]), Path(sys.argv[2])
-dst.mkdir(parents=True, exist_ok=True)
-prefix = next(src.glob("*.count.mtx")).name[: -len(".count.mtx")]
-barcodes = [x for x in (src / f"{prefix}.barcodes.txt").read_text().splitlines() if x]
-features = [ln.split("\t", 1)[0] for ln in (src / f"{prefix}.features.txt").read_text().splitlines() if ln]
-matrix = io.mmread(src / f"{prefix}.count.mtx").tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(f"Unexpected matrix shape {matrix.shape}")
-(dst / "barcodes.tsv").write_text("\n".join(barcodes) + "\n")
-(dst / "features.tsv").write_text("\n".join(features) + "\n")
-io.mmwrite(dst / "matrix.mtx", sparse.coo_matrix(matrix))
-PY
-}
+# Quantify transcripts with FLAMESv2
+mkdir -p results/PacBio/Bambu-pipe/flames_output
+cat > results/PacBio/Bambu-pipe/flames_output/run_flames.R <<'EOF'
+options(bspm.sudo = TRUE)
+basilisk::setBasiliskFork(FALSE)
+suppressPackageStartupMessages(library(FLAMES))
+outdir   <- "results/PacBio/Bambu-pipe/flames_output"
+fastq    <- "results/PacBio/Bambu-pipe/test_filtered.fastq.gz"
+annot    <- "results/PacBio/Bambu-pipe/extended_annotation.gtf"
+genome   <- "test/02-reference/fasta/genome.fa"
+barcodes <- "test/01-test-data/barcodes/3M-february-2018.txt"
+threads  <- 8L
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+cfg <- create_config(
+  outdir,
+  pipeline_parameters.demultiplexer = "flexiplex",
+  do_isoform_identification = FALSE,
+  bambu_isoform_identification = FALSE,
+  oarfish_quantification = TRUE,
+  threads = threads
+)
+pipeline <- SingleCellPipeline(
+  config_file = cfg, outdir = outdir, fastq = c(fastq),
+  annotation = annot, genome_fa = genome, barcodes_file = barcodes
+)
+pipeline <- run_FLAMES(pipeline)
+saveRDS(pipeline, file.path(outdir, "pipeline.rds"))
+EOF
+singularity exec -e --bind "$PWD:$PWD" flames.sif Rscript results/PacBio/Bambu-pipe/flames_output/run_flames.R
 
-run_te() {
-  activate miniTEQuant
-  if [[ ! -s "$TE_GTF" ]]; then
-    python "$MINITE/isoform_quantification/TE_analyse/create_simple_TE_gtf.py" \
-      -i "$REPEATMASKER" -o "$TE_GTF"
-  fi
-  python "$MINITE/isoform_quantification/main.py" cal_TE \
-    -gtf "$ANNOT" -te_gtf "$TE_GTF" \
-    --custom_sc_quant "$OUT/filtered_feature_bc_matrix" \
-    -t "$THREADS" -o "$OUT/te_quant"
-}
+# Rename the Oarfish files to a gzip-compressed 10x matrix
+mkdir -p results/PacBio/Bambu-pipe/filtered_feature_bc_matrix
+cp results/PacBio/Bambu-pipe/flames_output/oarfish.barcodes.txt results/PacBio/Bambu-pipe/filtered_feature_bc_matrix/barcodes.tsv
+cp results/PacBio/Bambu-pipe/flames_output/oarfish.features.txt results/PacBio/Bambu-pipe/filtered_feature_bc_matrix/features.tsv
+cp results/PacBio/Bambu-pipe/flames_output/oarfish.count.mtx results/PacBio/Bambu-pipe/filtered_feature_bc_matrix/matrix.mtx
+gzip -c results/PacBio/Bambu-pipe/filtered_feature_bc_matrix/barcodes.tsv > results/PacBio/Bambu-pipe/filtered_feature_bc_matrix/barcodes.tsv.gz
+gzip -c results/PacBio/Bambu-pipe/filtered_feature_bc_matrix/features.tsv > results/PacBio/Bambu-pipe/filtered_feature_bc_matrix/features.tsv.gz
+gzip -c results/PacBio/Bambu-pipe/filtered_feature_bc_matrix/matrix.mtx > results/PacBio/Bambu-pipe/filtered_feature_bc_matrix/matrix.mtx.gz
 
-classify() {
-  activate miniTEQuant
-  QUANT_DIR="$OUT/filtered_feature_bc_matrix" \
-  CLASS_FILE="$OUT/te_quant/Custom_SC_TE_output/cell_transcript_classification_counts.tsv" \
-  OUT_FILE="$OUT/transcript_class_counts.tsv" \
-  MAP_FILE="$OUT/transcript_class_map.tsv" \
-  UNMATCHED_FILE="$OUT/unmatched_transcripts.txt" \
-  python - <<'PY'
-import gzip, os, re
-from pathlib import Path
-import numpy as np, pandas as pd
-from scipy import io
-quant_dir = Path(os.environ["QUANT_DIR"])
-def open_text(path):
-    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
-def locate(stem):
-    for name in (stem, stem + ".gz"):
-        candidate = quant_dir / name
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(quant_dir / stem)
-def strip_version(identifier):
-    return re.sub(r"\.\d+$", "", identifier)
-barcodes = [ln.strip() for ln in open_text(locate("barcodes.tsv")) if ln.strip()]
-features = []
-with open_text(locate("features.tsv")) as handle:
-    for line in handle:
-        fields = line.rstrip("\n").split("\t")
-        if fields and fields[0]:
-            features.append(fields[0])
-matrix = io.mmread(locate("matrix.mtx")).tocsr()
-if matrix.shape == (len(barcodes), len(features)):
-    matrix = matrix.T.tocsr()
-if matrix.shape != (len(features), len(barcodes)):
-    raise SystemExit(f"Matrix shape {matrix.shape} does not match {len(features)} transcripts by {len(barcodes)} cells")
-table = pd.read_csv(os.environ["CLASS_FILE"], sep="\t", header=None, dtype=str, keep_default_na=False)
-if table.shape[1] < 11:
-    raise SystemExit("cell_transcript_classification_counts.tsv has fewer than 11 columns")
-if table.iloc[0, 10].strip().lower() in {"classification", "transcript_classification", "class"}:
-    table = table.iloc[1:].reset_index(drop=True)
-class_by_id, class_by_stripped = {}, {}
-for transcript_id, transcript_class in zip(table.iloc[:, 0], table.iloc[:, 10]):
-    transcript_id, transcript_class = transcript_id.strip(), transcript_class.strip()
-    if transcript_id and transcript_class:
-        class_by_id[transcript_id] = transcript_class
-        class_by_stripped.setdefault(strip_version(transcript_id), transcript_class)
-labels = []
-for transcript_id in features:
-    label = class_by_id.get(transcript_id)
-    if label is None:
-        label = class_by_stripped.get(strip_version(transcript_id))
-    labels.append(label)
-assignment = pd.DataFrame({"transcript_id": features, "class": labels})
-assignment.to_csv(os.environ["MAP_FILE"], sep="\t", index=False)
-assignment.loc[assignment["class"].isna(), "transcript_id"].to_csv(os.environ["UNMATCHED_FILE"], index=False, header=False)
-preferred = ["Gene-alone", "TE-alone", "TE-Gene"]
-present = [label for label in preferred if (assignment["class"] == label).any()]
-present += sorted(set(assignment["class"].dropna()) - set(preferred))
-if not present:
-    raise SystemExit("No quantification-matrix transcript matched a class")
-rows = []
-for label in present:
-    positions = [i for i, value in enumerate(labels) if value == label]
-    rows.append(np.asarray(matrix[positions].sum(axis=0)).ravel().astype(int))
-counts = pd.DataFrame(rows, index=present, columns=barcodes)
-counts.index.name = "class"
-counts.to_csv(os.environ["OUT_FILE"], sep="\t")
-print(f"Matched transcripts: {assignment['class'].notna().sum()} / {len(features)}")
-PY
-}
+# Quantify TE loci and subfamilies
+conda activate miniTEQuant
+python miniTEQuant/isoform_quantification/main.py cal_TE \
+    -gtf results/PacBio/Bambu-pipe/extended_annotation.gtf \
+    -te_gtf test/02-reference/TE-annotation/hg38_filtered_chromosomes.gtf \
+    --custom_sc_quant results/PacBio/Bambu-pipe/filtered_feature_bc_matrix \
+    -t "$THREADS" \
+    -o results/PacBio/Bambu-pipe/te_quant
 
-mkdir -p "$OUT"
-run_fastplong
-run_flames "$OUT/flames_align" "$REF_GTF"
-run_bambu
-run_flames "$OUT/flames_output" "$ANNOT"
-convert_matrix "$OUT/flames_output" "$OUT/filtered_feature_bc_matrix"
-run_te
-classify
-echo "PacBio Bambu-pipe results: $OUT/flames_align/align2genome.bam $OUT/extended_annotation.gtf $OUT/filtered_feature_bc_matrix $OUT/te_quant/Custom_SC_TE_output $OUT/transcript_class_counts.tsv"
+# Split transcripts into Gene-alone, TE-alone, and TE-Gene
+python split_by_transcript_classification.py \
+    --barcodes results/PacBio/Bambu-pipe/filtered_feature_bc_matrix/barcodes.tsv.gz \
+    --features results/PacBio/Bambu-pipe/filtered_feature_bc_matrix/features.tsv.gz \
+    --matrix results/PacBio/Bambu-pipe/filtered_feature_bc_matrix/matrix.mtx.gz \
+    --quant results/PacBio/Bambu-pipe/te_quant/transcript_quantification_with_TE.tsv
 ```
 
 ## Reproducibility
@@ -1875,10 +1207,11 @@ The recommended workflow is defined by the following versions and settings.
 | wf-single-cell | 3.3.4 | ONT barcode and UMI assignment |
 | LRAA | 0.15.0 | Reference-guided isoform discovery |
 | Bambu-pipe | 0.9.1 | Reference-guided isoform discovery |
-| Nextflow | >= 26.04.0 | Execution of wf-single-cell and Bambu-pipe |
+| Nextflow | 26.04.4 | Execution of wf-single-cell and Bambu-pipe |
+| RepeatMasker | 4.2.4, Dfam 4.0 curated consensus | Annotation of `path/to/genome.fa` written to `path/to/repeatmasker.out` |
 | miniTEQuant | `main` of [calm109/miniTEQuant](https://github.com/calm109/miniTEQuant) | TE annotation, locus and subfamily counts, transcript classes |
 
 Record the commit of miniTEQuant used to create `path/to/TE_annotation.gtf` (`git -C path/to/miniTEQuant rev-parse HEAD`). Keep that GTF with the count matrix. FLAMESv2 quantification and `cal_TE -gtf` must receive the same annotation, either `path/to/genes.gtf` or `path/to/extended_annotation.gtf`.
 
-Platform-specific settings that affect the matrices are the fastplong filters (`-m 20 -l 100 -A`), the wf-single-cell kit and expected cell number, the FLAMESv2 configuration (`flexiplex` demultiplexing, isoform identification disabled, Oarfish quantification enabled), and the LRAA tags `CB` and `UB`, with `--HiFi` restricted to PacBio. Cite each program from the publication linked in its repository when reporting results obtained with this workflow.
+Platform-specific settings that affect the matrices are the fastplong filters (`-m 20 -l 100 -A`), the wf-single-cell kit and expected cell number, the FLAMESv2 configuration (`flexiplex` demultiplexing, isoform identification disabled, Oarfish quantification enabled), the RepeatMasker settings (`-species human -engine rmblast`), and the LRAA tags `CB` and `UB`, with `--HiFi` restricted to PacBio. Cite each program from the publication linked in its repository when reporting results obtained with this workflow.
 
