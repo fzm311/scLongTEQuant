@@ -6,7 +6,7 @@ Usage:
   python split_by_transcript_classification.py \
     --barcodes barcodes.tsv \
     --features features.tsv \
-    --matrix matrixs.mtx \
+    --matrix matrix.mtx \
     --quant transcript_quantification_with_TE.tsv
 """
 
